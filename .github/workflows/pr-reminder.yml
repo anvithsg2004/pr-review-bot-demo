@@ -4,7 +4,7 @@ on:
   schedule:
     # Every 5 minutes for demo/testing
     # Change to '0 * * * *' for production (every hour)
-    - cron: '*/5 * * * *'
+    - cron: '*/15 * * * *'
 
   workflow_dispatch:
     inputs:
