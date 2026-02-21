@@ -1,0 +1,39 @@
+{
+  "escalation_thresholds": {
+    "low": {
+      "minutes": 0,
+      "severity": "LOW",
+      "emoji": "🟢",
+      "color": "#36a64f",
+      "notify": ["channel"]
+    },
+    "medium": {
+      "minutes": 5,
+      "severity": "MEDIUM",
+      "emoji": "🟡",
+      "color": "#ff9900",
+      "notify": ["channel", "tech_lead"]
+    },
+    "high": {
+      "minutes": 10,
+      "severity": "HIGH",
+      "emoji": "🔴",
+      "color": "#ff0000",
+      "notify": ["channel", "tech_lead", "manager"]
+    },
+    "critical": {
+      "minutes": 20,
+      "severity": "CRITICAL",
+      "emoji": "🚨",
+      "color": "#8B0000",
+      "notify": ["channel", "tech_lead", "manager"]
+    }
+  },
+  "team_members": {
+    "anvithsg2004": {
+      "slack_id": "U0AG836C40M",
+      "name": "Anvith S G",
+      "role": "developer"
+    }
+  }
+}

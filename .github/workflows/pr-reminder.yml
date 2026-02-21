@@ -1,0 +1,360 @@
+name: PR Review Reminder and Escalation
+
+on:
+  schedule:
+    # Every 5 minutes for demo/testing
+    # Change to '0 * * * *' for production (every hour)
+    - cron: '*/5 * * * *'
+
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run - only log, do not send Slack messages'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  check-pending-reviews:
+    name: Check Pending PR Reviews
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Find Pending PRs and Calculate Severity
+        id: pending-prs
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const config = JSON.parse(
+              fs.readFileSync('.github/config/team-config.json', 'utf8')
+            );
+
+            // ========================================
+            // FETCH ALL OPEN PRs
+            // ========================================
+            const { data: pullRequests } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              sort: 'created',
+              direction: 'asc'
+            });
+
+            console.log(`Found ${pullRequests.length} open PRs`);
+
+            const pendingPRs = [];
+
+            for (const pr of pullRequests) {
+              console.log(`\nChecking PR #${pr.number}: ${pr.title}`);
+
+              // Skip drafts
+              if (pr.draft) {
+                console.log(`  ⏭️ Skipping: draft`);
+                continue;
+              }
+
+              // Skip PRs with opt-out labels
+              const skipLabels = ['no-reminder', 'wip', 'on-hold'];
+              if (pr.labels.some(l => skipLabels.includes(l.name))) {
+                console.log(`  ⏭️ Skipping: has opt-out label`);
+                continue;
+              }
+
+              // ========================================
+              // CHECK REVIEW STATUS
+              // ========================================
+              const { data: reviews } = await github.rest.pulls.listReviews({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number
+              });
+
+              // Get latest review per reviewer
+              const latestReviews = {};
+              for (const r of reviews) {
+                if (!latestReviews[r.user.login] ||
+                    new Date(r.submitted_at) > new Date(latestReviews[r.user.login].submitted_at)) {
+                  latestReviews[r.user.login] = r;
+                }
+              }
+
+              const approvals = Object.values(latestReviews)
+                .filter(r => r.state === 'APPROVED');
+              const changesRequested = Object.values(latestReviews)
+                .filter(r => r.state === 'CHANGES_REQUESTED');
+
+              // Pending reviewers = requested but haven't reviewed
+              const stillPending = pr.requested_reviewers
+                .filter(r => !latestReviews[r.login]);
+
+              // SKIP: Fully approved
+              if (stillPending.length === 0 &&
+                  changesRequested.length === 0 &&
+                  approvals.length > 0) {
+                console.log(`  ✅ Skipping: fully approved`);
+                continue;
+              }
+
+              // SKIP: No reviewers at all
+              if (pr.requested_reviewers.length === 0 &&
+                  Object.keys(latestReviews).length === 0) {
+                console.log(`  ⏭️ Skipping: no reviewers assigned`);
+                continue;
+              }
+
+              // ========================================
+              // CALCULATE TIME ELAPSED
+              // ========================================
+              const createdAt = new Date(pr.created_at);
+              const now = new Date();
+              const minutesElapsed = (now - createdAt) / (1000 * 60);
+              const hoursElapsed = minutesElapsed / 60;
+
+              console.log(`  ⏰ Minutes elapsed: ${Math.round(minutesElapsed)}`);
+
+              // ========================================
+              // DETERMINE SEVERITY (using minutes for demo)
+              // ========================================
+              let severity = 'low';
+              let severityConfig = config.escalation_thresholds.low;
+
+              const thresholds = config.escalation_thresholds;
+              if (minutesElapsed >= thresholds.critical.minutes) {
+                severity = 'critical';
+                severityConfig = thresholds.critical;
+              } else if (minutesElapsed >= thresholds.high.minutes) {
+                severity = 'high';
+                severityConfig = thresholds.high;
+              } else if (minutesElapsed >= thresholds.medium.minutes) {
+                severity = 'medium';
+                severityConfig = thresholds.medium;
+              }
+
+              console.log(`  🎯 Severity: ${severity}`);
+
+              // ========================================
+              // MAP TO SLACK MENTIONS
+              // ========================================
+              function getSlackMention(githubUsername) {
+                const member = config.team_members[githubUsername];
+                return member ? `<@${member.slack_id}>` : `@${githubUsername}`;
+              }
+
+              const reviewerMentions = (stillPending.length > 0
+                ? stillPending.map(r => getSlackMention(r.login))
+                : pr.requested_reviewers.map(r => getSlackMention(r.login))
+              );
+
+              const authorMention = getSlackMention(pr.user.login);
+
+              // Determine status message
+              let statusMessage = '';
+              let prType = 'pending';
+
+              if (changesRequested.length > 0 && stillPending.length === 0) {
+                statusMessage = `🔄 Changes requested — waiting for ${authorMention} to update`;
+                prType = 'changes_requested';
+              } else if (approvals.length > 0 && stillPending.length > 0) {
+                statusMessage = `✅ ${approvals.length} approved, ⏳ waiting for: ${reviewerMentions.join(', ')}`;
+                prType = 'partial';
+              } else {
+                statusMessage = `⏳ Waiting for review: ${reviewerMentions.join(', ')}`;
+                prType = 'no_review';
+              }
+
+              // Build escalation notice
+              let escalationNotice = '';
+              if (severityConfig.notify.includes('tech_lead')) {
+                escalationNotice += '👨‍💼 Tech Lead notified | ';
+              }
+              if (severityConfig.notify.includes('manager')) {
+                escalationNotice += '👔 Manager notified | ';
+              }
+
+              pendingPRs.push({
+                number: pr.number,
+                title: pr.title,
+                url: pr.html_url,
+                author: pr.user.login,
+                author_mention: authorMention,
+                reviewer_mentions: reviewerMentions.join(', '),
+                minutes_elapsed: Math.round(minutesElapsed),
+                hours_elapsed: Math.round(hoursElapsed * 10) / 10,
+                severity: severity,
+                severity_emoji: severityConfig.emoji,
+                severity_label: severityConfig.severity,
+                status_message: statusMessage,
+                escalation_notice: escalationNotice,
+                pr_type: prType,
+                additions: pr.additions || 0,
+                deletions: pr.deletions || 0,
+                changed_files: pr.changed_files || 0
+              });
+            }
+
+            console.log(`\n📊 Total pending PRs: ${pendingPRs.length}`);
+            core.setOutput('pending_prs', JSON.stringify(pendingPRs));
+            core.setOutput('should_notify', (pendingPRs.length > 0).toString());
+            core.setOutput('count', pendingPRs.length);
+
+      - name: Send Reminder to Slack
+        if: steps.pending-prs.outputs.should_notify == 'true'
+        uses: actions/github-script@v7
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        with:
+          script: |
+            const pendingPRs = JSON.parse(
+              `${{ steps.pending-prs.outputs.pending_prs }}`
+            );
+
+            // ========================================
+            // BUILD SLACK MESSAGE
+            // ========================================
+            const blocks = [
+              {
+                type: "header",
+                text: {
+                  type: "plain_text",
+                  text: `⏰ PR Review Reminder — ${pendingPRs.length} PR(s) Pending`,
+                  emoji: true
+                }
+              },
+              {
+                type: "context",
+                elements: [{
+                  type: "mrkdwn",
+                  text: `📅 ${new Date().toUTCString()}`
+                }]
+              },
+              { type: "divider" }
+            ];
+
+            for (const pr of pendingPRs) {
+              blocks.push({
+                type: "section",
+                text: {
+                  type: "mrkdwn",
+                  text: `${pr.severity_emoji} *<${pr.url}|#${pr.number}: ${pr.title}>*\n` +
+                        `👤 Author: ${pr.author_mention}\n` +
+                        `${pr.status_message}\n` +
+                        `⏰ Pending: *${pr.minutes_elapsed} minutes* (${pr.hours_elapsed}h)\n` +
+                        `📊 +${pr.additions}/-${pr.deletions} | ${pr.changed_files} files\n` +
+                        (pr.escalation_notice ? `🚨 ${pr.escalation_notice}` : '')
+                },
+                accessory: {
+                  type: "button",
+                  text: {
+                    type: "plain_text",
+                    text: "Review Now",
+                    emoji: true
+                  },
+                  url: `${pr.url}/files`,
+                  style: ['high', 'critical'].includes(pr.severity) ? "danger" : "primary"
+                }
+              });
+
+              blocks.push({ type: "divider" });
+            }
+
+            // Summary
+            const summary = {
+              critical: pendingPRs.filter(p => p.severity === 'critical').length,
+              high: pendingPRs.filter(p => p.severity === 'high').length,
+              medium: pendingPRs.filter(p => p.severity === 'medium').length,
+              low: pendingPRs.filter(p => p.severity === 'low').length
+            };
+
+            blocks.push({
+              type: "context",
+              elements: [{
+                type: "mrkdwn",
+                text: `📈 🚨 Critical: ${summary.critical} | 🔴 High: ${summary.high} | 🟡 Medium: ${summary.medium} | 🟢 Low: ${summary.low}`
+              }]
+            });
+
+            const payload = { blocks };
+
+            // ========================================
+            // SEND TO SLACK
+            // ========================================
+            if (process.env.DRY_RUN === 'true') {
+              console.log('🏃 DRY RUN — Message preview:');
+              console.log(JSON.stringify(payload, null, 2));
+              return;
+            }
+
+            const https = require('https');
+            const webhookUrl = new URL(process.env.SLACK_WEBHOOK_URL);
+
+            const result = await new Promise((resolve, reject) => {
+              const req = https.request({
+                hostname: webhookUrl.hostname,
+                path: webhookUrl.pathname,
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+              }, (res) => {
+                let data = '';
+                res.on('data', chunk => data += chunk);
+                res.on('end', () => resolve(data));
+              });
+              req.on('error', reject);
+              req.write(JSON.stringify(payload));
+              req.end();
+            });
+
+            console.log(`✅ Slack response: ${result}`);
+
+      - name: Update PR Labels
+        if: steps.pending-prs.outputs.should_notify == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pendingPRs = JSON.parse(
+              `${{ steps.pending-prs.outputs.pending_prs }}`
+            );
+
+            const allSeverityLabels = [
+              'review-severity:low',
+              'review-severity:medium',
+              'review-severity:high',
+              'review-severity:critical'
+            ];
+
+            for (const pr of pendingPRs) {
+              const newLabel = `review-severity:${pr.severity}`;
+
+              // Remove old labels
+              for (const label of allSeverityLabels) {
+                if (label !== newLabel) {
+                  try {
+                    await github.rest.issues.removeLabel({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      issue_number: pr.number,
+                      name: label
+                    });
+                  } catch (e) {}
+                }
+              }
+
+              // Add new label
+              try {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  labels: [newLabel]
+                });
+                console.log(`✅ PR #${pr.number} → ${newLabel}`);
+              } catch (e) {
+                console.log(`⚠️ Could not add label: ${e.message}`);
+              }
+            }
