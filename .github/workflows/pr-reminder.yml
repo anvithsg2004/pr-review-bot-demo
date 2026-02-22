@@ -2,8 +2,6 @@ name: PR Review Reminder and Escalation
 
 on:
   schedule:
-    # Every 5 minutes for demo/testing
-    # Change to '0 * * * *' for production (every hour)
     - cron: '*/15 * * * *'
 
   workflow_dispatch:
@@ -14,7 +12,7 @@ on:
         default: false
         type: boolean
 
-permissions: 
+permissions:
   contents: read
   pull-requests: write
   issues: write
@@ -39,9 +37,6 @@ jobs:
               fs.readFileSync('.github/config/team-config.json', 'utf8')
             );
 
-            // ========================================
-            // FETCH ALL OPEN PRs
-            // ========================================
             const { data: pullRequests } = await github.rest.pulls.list({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -57,29 +52,23 @@ jobs:
             for (const pr of pullRequests) {
               console.log(`\nChecking PR #${pr.number}: ${pr.title}`);
 
-              // Skip drafts
               if (pr.draft) {
                 console.log(`  ⏭️ Skipping: draft`);
                 continue;
               }
 
-              // Skip PRs with opt-out labels
               const skipLabels = ['no-reminder', 'wip', 'on-hold'];
               if (pr.labels.some(l => skipLabels.includes(l.name))) {
                 console.log(`  ⏭️ Skipping: has opt-out label`);
                 continue;
               }
 
-              // ========================================
-              // CHECK REVIEW STATUS
-              // ========================================
               const { data: reviews } = await github.rest.pulls.listReviews({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 pull_number: pr.number
               });
 
-              // Get latest review per reviewer
               const latestReviews = {};
               for (const r of reviews) {
                 if (!latestReviews[r.user.login] ||
@@ -92,12 +81,9 @@ jobs:
                 .filter(r => r.state === 'APPROVED');
               const changesRequested = Object.values(latestReviews)
                 .filter(r => r.state === 'CHANGES_REQUESTED');
-
-              // Pending reviewers = requested but haven't reviewed
               const stillPending = pr.requested_reviewers
                 .filter(r => !latestReviews[r.login]);
 
-              // SKIP: Fully approved
               if (stillPending.length === 0 &&
                   changesRequested.length === 0 &&
                   approvals.length > 0) {
@@ -105,16 +91,13 @@ jobs:
                 continue;
               }
 
-              // SKIP: No reviewers at all
-              if (pr.requested_reviewers.length === 0 &&
-                  Object.keys(latestReviews).length === 0) {
-                console.log(`  ⏭️ Skipping: no reviewers assigned`);
-                continue;
+              const hasNoReviewers = pr.requested_reviewers.length === 0 &&
+                                     Object.keys(latestReviews).length === 0;
+
+              if (hasNoReviewers) {
+                console.log(`  ⚠️ No reviewers assigned — will still send reminder`);
               }
 
-              // ========================================
-              // CALCULATE TIME ELAPSED
-              // ========================================
               const createdAt = new Date(pr.created_at);
               const now = new Date();
               const minutesElapsed = (now - createdAt) / (1000 * 60);
@@ -122,9 +105,6 @@ jobs:
 
               console.log(`  ⏰ Minutes elapsed: ${Math.round(minutesElapsed)}`);
 
-              // ========================================
-              // DETERMINE SEVERITY (using minutes for demo)
-              // ========================================
               let severity = 'low';
               let severityConfig = config.escalation_thresholds.low;
 
@@ -142,37 +122,32 @@ jobs:
 
               console.log(`  🎯 Severity: ${severity}`);
 
-              // ========================================
-              // MAP TO SLACK MENTIONS
-              // ========================================
               function getSlackMention(githubUsername) {
                 const member = config.team_members[githubUsername];
                 return member ? `<@${member.slack_id}>` : `@${githubUsername}`;
               }
 
-              const reviewerMentions = (stillPending.length > 0
-                ? stillPending.map(r => getSlackMention(r.login))
-                : pr.requested_reviewers.map(r => getSlackMention(r.login))
-              );
-
               const authorMention = getSlackMention(pr.user.login);
 
-              // Determine status message
               let statusMessage = '';
               let prType = 'pending';
 
-              if (changesRequested.length > 0 && stillPending.length === 0) {
+              if (hasNoReviewers) {
+                statusMessage = '⚠️ No reviewers assigned! Someone please review or assign a reviewer.';
+                prType = 'no_reviewer';
+              } else if (changesRequested.length > 0 && stillPending.length === 0) {
                 statusMessage = `🔄 Changes requested — waiting for ${authorMention} to update`;
                 prType = 'changes_requested';
               } else if (approvals.length > 0 && stillPending.length > 0) {
+                const reviewerMentions = stillPending.map(r => getSlackMention(r.login));
                 statusMessage = `✅ ${approvals.length} approved, ⏳ waiting for: ${reviewerMentions.join(', ')}`;
                 prType = 'partial';
               } else {
+                const reviewerMentions = pr.requested_reviewers.map(r => getSlackMention(r.login));
                 statusMessage = `⏳ Waiting for review: ${reviewerMentions.join(', ')}`;
                 prType = 'no_review';
               }
 
-              // Build escalation notice
               let escalationNotice = '';
               if (severityConfig.notify.includes('tech_lead')) {
                 escalationNotice += '👨‍💼 Tech Lead notified | ';
@@ -187,7 +162,6 @@ jobs:
                 url: pr.html_url,
                 author: pr.user.login,
                 author_mention: authorMention,
-                reviewer_mentions: reviewerMentions.join(', '),
                 minutes_elapsed: Math.round(minutesElapsed),
                 hours_elapsed: Math.round(hoursElapsed * 10) / 10,
                 severity: severity,
@@ -219,9 +193,6 @@ jobs:
               `${{ steps.pending-prs.outputs.pending_prs }}`
             );
 
-            // ========================================
-            // BUILD SLACK MESSAGE
-            // ========================================
             const blocks = [
               {
                 type: "header",
@@ -268,7 +239,6 @@ jobs:
               blocks.push({ type: "divider" });
             }
 
-            // Summary
             const summary = {
               critical: pendingPRs.filter(p => p.severity === 'critical').length,
               high: pendingPRs.filter(p => p.severity === 'high').length,
@@ -286,9 +256,6 @@ jobs:
 
             const payload = { blocks };
 
-            // ========================================
-            // SEND TO SLACK
-            // ========================================
             if (process.env.DRY_RUN === 'true') {
               console.log('🏃 DRY RUN — Message preview:');
               console.log(JSON.stringify(payload, null, 2));
@@ -336,7 +303,6 @@ jobs:
             for (const pr of pendingPRs) {
               const newLabel = `review-severity:${pr.severity}`;
 
-              // Remove old labels
               for (const label of allSeverityLabels) {
                 if (label !== newLabel) {
                   try {
@@ -350,7 +316,6 @@ jobs:
                 }
               }
 
-              // Add new label
               try {
                 await github.rest.issues.addLabels({
                   owner: context.repo.owner,
