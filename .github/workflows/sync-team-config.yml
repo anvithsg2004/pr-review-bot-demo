@@ -1,0 +1,274 @@
+name: Sync Team Config from Slack
+
+on:
+  schedule:
+    - cron: '0 9 * * 1-5'
+
+  workflow_dispatch:
+    inputs:
+      channel_id:
+        description: 'Slack Channel ID'
+        required: false
+        default: 'C0AGQDNJFCZ'
+        type: string
+      dry_run:
+        description: 'Preview changes without committing'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  sync-team:
+    name: Sync Team Members from Slack
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Fetch Slack Channel Members
+        id: fetch-members
+        uses: actions/github-script@v7
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          CHANNEL_ID: ${{ inputs.channel_id || 'C0AGQDNJFCZ' }}
+        with:
+          script: |
+            const https = require('https');
+
+            // ========================================
+            // HELPER: Call Slack API
+            // ========================================
+            async function slackAPI(method, params = {}) {
+              const queryString = new URLSearchParams(params).toString();
+              const url = `/api/${method}?${queryString}`;
+
+              return new Promise((resolve, reject) => {
+                const req = https.request({
+                  hostname: 'slack.com',
+                  path: url,
+                  method: 'GET',
+                  headers: {
+                    'Authorization': `Bearer ${process.env.SLACK_BOT_TOKEN}`,
+                    'Content-Type': 'application/json; charset=utf-8'
+                  }
+                }, (res) => {
+                  let data = '';
+                  res.on('data', chunk => data += chunk);
+                  res.on('end', () => {
+                    try {
+                      resolve(JSON.parse(data));
+                    } catch (e) {
+                      reject(new Error(`Failed to parse: ${data}`));
+                    }
+                  });
+                });
+                req.on('error', reject);
+                req.end();
+              });
+            }
+
+            // ========================================
+            // STEP 1: Get all members in the channel
+            // ========================================
+            console.log('📡 Fetching channel members...');
+            console.log(`Channel ID: ${process.env.CHANNEL_ID}`);
+
+            const channelResponse = await slackAPI('conversations.members', {
+              channel: process.env.CHANNEL_ID,
+              limit: 200
+            });
+
+            if (!channelResponse.ok) {
+              core.setFailed(`Slack API error: ${channelResponse.error}`);
+              return;
+            }
+
+            const memberIds = channelResponse.members;
+            console.log(`👥 Found ${memberIds.length} members in channel\n`);
+
+            // ========================================
+            // STEP 2: Get detailed info for each member
+            // ========================================
+            const teamMembers = {};
+
+            for (const userId of memberIds) {
+              console.log(`Fetching info for: ${userId}`);
+
+              const userResponse = await slackAPI('users.info', {
+                user: userId
+              });
+
+              if (!userResponse.ok) {
+                console.log(`  ⚠️ Could not fetch: ${userResponse.error}`);
+                continue;
+              }
+
+              const user = userResponse.user;
+
+              // Skip bots and Slackbot
+              if (user.is_bot || user.id === 'USLACKBOT') {
+                console.log(`  🤖 Skipping bot: ${user.name}`);
+                continue;
+              }
+
+              const profile = user.profile;
+
+              // Determine role from Slack title
+              const title = (profile.title || '').toLowerCase();
+              let role = 'developer';
+
+              if (title.includes('manager') || title.includes('director')) {
+                role = 'manager';
+              } else if (title.includes('lead') || title.includes('senior') || title.includes('principal')) {
+                role = 'tech_lead';
+              } else if (title.includes('intern')) {
+                role = 'intern';
+              }
+
+              const displayName = profile.display_name || user.name;
+
+              teamMembers[user.name] = {
+                slack_id: user.id,
+                name: profile.real_name || displayName,
+                role: role,
+                title: profile.title || 'Not set',
+                email: profile.email || 'Not available',
+                display_name: displayName,
+                is_admin: user.is_admin || false,
+                timezone: user.tz || 'Unknown'
+              };
+
+              console.log(`  ✅ ${profile.real_name || displayName}`);
+              console.log(`     Slack ID: ${user.id}`);
+              console.log(`     Title: ${profile.title || 'Not set'}`);
+              console.log(`     Role: ${role}`);
+              console.log(`     Timezone: ${user.tz || 'Unknown'}\n`);
+            }
+
+            console.log(`\n📊 Total team members: ${Object.keys(teamMembers).length}`);
+            core.setOutput('team_members', JSON.stringify(teamMembers));
+            core.setOutput('member_count', Object.keys(teamMembers).length);
+
+      - name: Update team-config.json
+        id: update-config
+        uses: actions/github-script@v7
+        env:
+          DRY_RUN: ${{ inputs.dry_run || 'true' }}
+        with:
+          script: |
+            const fs = require('fs');
+
+            const configPath = '.github/config/team-config.json';
+            const currentConfig = JSON.parse(
+              fs.readFileSync(configPath, 'utf8')
+            );
+
+            const slackMembers = JSON.parse(
+              `${{ steps.fetch-members.outputs.team_members }}`
+            );
+
+            // ========================================
+            // BUILD UPDATED CONFIG
+            // ========================================
+            const updatedConfig = {
+              escalation_thresholds: currentConfig.escalation_thresholds,
+              team_members: {},
+              slack_channel_id: '${{ inputs.channel_id || 'C0AGQDNJFCZ' }}',
+              _last_synced: new Date().toISOString(),
+              _member_count: Object.keys(slackMembers).length
+            };
+
+            // Keep existing members with their GitHub username mapping
+            for (const [githubUser, existingData] of Object.entries(currentConfig.team_members || {})) {
+              updatedConfig.team_members[githubUser] = existingData;
+            }
+
+            // Add/update members from Slack
+            for (const [slackUsername, memberData] of Object.entries(slackMembers)) {
+              // Check if this Slack user already exists
+              const existingEntry = Object.entries(updatedConfig.team_members)
+                .find(([_, data]) => data.slack_id === memberData.slack_id);
+
+              if (existingEntry) {
+                const [key, _] = existingEntry;
+                updatedConfig.team_members[key] = {
+                  ...updatedConfig.team_members[key],
+                  slack_id: memberData.slack_id,
+                  name: memberData.name,
+                  role: updatedConfig.team_members[key].role || memberData.role,
+                  title: memberData.title,
+                  email: memberData.email,
+                  timezone: memberData.timezone
+                };
+                console.log(`🔄 Updated existing: ${key}`);
+              } else {
+                updatedConfig.team_members[slackUsername] = {
+                  slack_id: memberData.slack_id,
+                  name: memberData.name,
+                  role: memberData.role,
+                  title: memberData.title,
+                  email: memberData.email,
+                  github_username: 'NEEDS_MAPPING',
+                  timezone: memberData.timezone
+                };
+                console.log(`➕ Added new: ${slackUsername} (${memberData.name})`);
+              }
+            }
+
+            // ========================================
+            // SHOW PREVIEW
+            // ========================================
+            console.log('\n📋 Updated team-config.json:\n');
+            const prettyConfig = JSON.stringify(updatedConfig, null, 2);
+            console.log(prettyConfig);
+
+            if (process.env.DRY_RUN === 'true') {
+              console.log('\n🏃 DRY RUN — No changes written to file');
+              core.setOutput('updated', 'false');
+              return;
+            }
+
+            // Write file
+            fs.writeFileSync(configPath, prettyConfig + '\n');
+            console.log('\n✅ team-config.json updated!');
+            core.setOutput('updated', 'true');
+
+      - name: Commit and Push Changes
+        if: inputs.dry_run == false
+        run: |
+          git config user.name "PR Review Bot"
+          git config user.email "bot@github-actions"
+
+          git add .github/config/team-config.json
+
+          if git diff --staged --quiet; then
+            echo "📭 No changes to commit"
+          else
+            git commit -m "Auto-sync team config from Slack [skip ci]"
+            git push origin main
+            echo "✅ Changes committed and pushed!"
+          fi
+
+      - name: Post Summary to Slack
+        if: inputs.dry_run == false
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "🔄 *Team Config Auto-Synced!*\n\n👥 Members synced: ${{ steps.fetch-members.outputs.member_count }}\n📅 Time: Just now\n\n_Config updated from Slack channel automatically._"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
