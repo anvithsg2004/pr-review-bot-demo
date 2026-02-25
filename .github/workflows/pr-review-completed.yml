@@ -7,8 +7,7 @@ on:
   pull_request:
     types: [closed]
 
-
-permissions: 
+permissions:
   contents: read
   pull-requests: write
   issues: write
@@ -107,8 +106,8 @@ jobs:
                   "type": "header",
                   "text": {
                     "type": "plain_text",
-                    "text": "✅ PR Fully Approved! Ready to Merge 🎉",
-                    "emoji": true
+                    "text": "PR Approved — Ready to Merge",
+                    "emoji": false
                   }
                 },
                 {
@@ -137,7 +136,7 @@ jobs:
                   "elements": [
                     {
                       "type": "mrkdwn",
-                      "text": "🟢 All reminders stopped. PR is ready to merge! 🚀"
+                      "text": "All reminders stopped. This PR is ready to merge."
                     }
                   ]
                 },
@@ -148,8 +147,8 @@ jobs:
                       "type": "button",
                       "text": {
                         "type": "plain_text",
-                        "text": "🔀 Merge PR",
-                        "emoji": true
+                        "text": "Merge PR",
+                        "emoji": false
                       },
                       "url": "${{ steps.review-status.outputs.pr_url }}",
                       "style": "primary"
@@ -176,7 +175,7 @@ jobs:
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": "✅ *Partial Approval* — *<${{ steps.review-status.outputs.pr_url }}|#${{ steps.review-status.outputs.pr_number }}: ${{ steps.review-status.outputs.pr_title }}>*\n\n✅ ${{ steps.review-status.outputs.reviewer_mention }} approved (took ${{ steps.review-status.outputs.review_time }})\n⏳ Still waiting for: ${{ steps.review-status.outputs.still_waiting }}\n📊 Approvals: ${{ steps.review-status.outputs.approval_count }}/${{ steps.review-status.outputs.pending_count }} remaining"
+                    "text": "*Partial Approval* — *<${{ steps.review-status.outputs.pr_url }}|#${{ steps.review-status.outputs.pr_number }}: ${{ steps.review-status.outputs.pr_title }}>*\n\n${{ steps.review-status.outputs.reviewer_mention }} approved (review time: ${{ steps.review-status.outputs.review_time }})\nStill waiting on: ${{ steps.review-status.outputs.still_waiting }}\nApprovals: ${{ steps.review-status.outputs.approval_count }} received, ${{ steps.review-status.outputs.pending_count }} remaining"
                   }
                 },
                 {
@@ -184,7 +183,7 @@ jobs:
                   "elements": [
                     {
                       "type": "mrkdwn",
-                      "text": "⏰ Reminders will continue for remaining reviewers"
+                      "text": "Reminders will continue for remaining reviewers."
                     }
                   ]
                 }
@@ -206,7 +205,7 @@ jobs:
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": "🔄 *Changes Requested* on *<${{ steps.review-status.outputs.pr_url }}|#${{ steps.review-status.outputs.pr_number }}: ${{ steps.review-status.outputs.pr_title }}>*\n\n👀 Reviewer: ${{ steps.review-status.outputs.reviewer_mention }}\n👤 ${{ steps.review-status.outputs.author_mention }} — please address the feedback\n\n💬 *Feedback:*\n> ${{ steps.review-status.outputs.review_body }}"
+                    "text": "*Changes Requested* on *<${{ steps.review-status.outputs.pr_url }}|#${{ steps.review-status.outputs.pr_number }}: ${{ steps.review-status.outputs.pr_title }}>*\n\nReviewer: ${{ steps.review-status.outputs.reviewer_mention }}\n${{ steps.review-status.outputs.author_mention }} — please address the feedback.\n\n*Feedback:*\n> ${{ steps.review-status.outputs.review_body }}"
                   }
                 },
                 {
@@ -216,8 +215,8 @@ jobs:
                       "type": "button",
                       "text": {
                         "type": "plain_text",
-                        "text": "📝 View Feedback",
-                        "emoji": true
+                        "text": "View Feedback",
+                        "emoji": false
                       },
                       "url": "${{ steps.review-status.outputs.pr_url }}",
                       "style": "primary"
@@ -282,7 +281,7 @@ jobs:
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": "🎊 *PR Merged!*\n\n*<${{ github.event.pull_request.html_url }}|#${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}>*\n\n👤 Author: *${{ github.event.pull_request.user.login }}*\n🔀 Merged into `${{ github.event.pull_request.base.ref }}`\n📊 +${{ github.event.pull_request.additions }}/-${{ github.event.pull_request.deletions }}"
+                    "text": "*PR Merged*\n\n*<${{ github.event.pull_request.html_url }}|#${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}>*\n\nAuthor: *${{ github.event.pull_request.user.login }}*\nMerged into `${{ github.event.pull_request.base.ref }}`\n+${{ github.event.pull_request.additions }}/-${{ github.event.pull_request.deletions }}"
                   }
                 }
               ]
@@ -302,7 +301,7 @@ jobs:
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": "🚫 *PR Closed* (not merged)\n\n*<${{ github.event.pull_request.html_url }}|#${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}>*\n\n⏰ All reminders stopped."
+                    "text": "*PR Closed Without Merge*\n\n*<${{ github.event.pull_request.html_url }}|#${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}>*\n\nAll reminders stopped."
                   }
                 }
               ]

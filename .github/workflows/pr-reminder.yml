@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Dry run - only log, do not send Slack messages'
+        description: 'Dry run — only log, do not send Slack messages'
         required: false
         default: false
         type: boolean
@@ -53,13 +53,13 @@ jobs:
               console.log(`\nChecking PR #${pr.number}: ${pr.title}`);
 
               if (pr.draft) {
-                console.log(`  ⏭️ Skipping: draft`);
+                console.log(`  Skipping: draft`);
                 continue;
               }
 
               const skipLabels = ['no-reminder', 'wip', 'on-hold'];
               if (pr.labels.some(l => skipLabels.includes(l.name))) {
-                console.log(`  ⏭️ Skipping: has opt-out label`);
+                console.log(`  Skipping: has opt-out label`);
                 continue;
               }
 
@@ -87,7 +87,7 @@ jobs:
               if (stillPending.length === 0 &&
                   changesRequested.length === 0 &&
                   approvals.length > 0) {
-                console.log(`  ✅ Skipping: fully approved`);
+                console.log(`  Skipping: fully approved`);
                 continue;
               }
 
@@ -95,7 +95,7 @@ jobs:
                                      Object.keys(latestReviews).length === 0;
 
               if (hasNoReviewers) {
-                console.log(`  ⚠️ No reviewers assigned — will still send reminder`);
+                console.log(`  No reviewers assigned — will still send reminder`);
               }
 
               const createdAt = new Date(pr.created_at);
@@ -103,7 +103,7 @@ jobs:
               const minutesElapsed = (now - createdAt) / (1000 * 60);
               const hoursElapsed = minutesElapsed / 60;
 
-              console.log(`  ⏰ Minutes elapsed: ${Math.round(minutesElapsed)}`);
+              console.log(`  Minutes elapsed: ${Math.round(minutesElapsed)}`);
 
               let severity = 'low';
               let severityConfig = config.escalation_thresholds.low;
@@ -120,7 +120,7 @@ jobs:
                 severityConfig = thresholds.medium;
               }
 
-              console.log(`  🎯 Severity: ${severity}`);
+              console.log(`  Severity: ${severity}`);
 
               function getSlackMention(githubUsername) {
                 const member = config.team_members[githubUsername];
@@ -133,27 +133,27 @@ jobs:
               let prType = 'pending';
 
               if (hasNoReviewers) {
-                statusMessage = '⚠️ No reviewers assigned! Someone please review or assign a reviewer.';
+                statusMessage = 'No reviewers assigned. A reviewer should be added or someone should pick this up.';
                 prType = 'no_reviewer';
               } else if (changesRequested.length > 0 && stillPending.length === 0) {
-                statusMessage = `🔄 Changes requested — waiting for ${authorMention} to update`;
+                statusMessage = `Changes requested — waiting on ${authorMention} to update`;
                 prType = 'changes_requested';
               } else if (approvals.length > 0 && stillPending.length > 0) {
                 const reviewerMentions = stillPending.map(r => getSlackMention(r.login));
-                statusMessage = `✅ ${approvals.length} approved, ⏳ waiting for: ${reviewerMentions.join(', ')}`;
+                statusMessage = `${approvals.length} approved, still waiting on: ${reviewerMentions.join(', ')}`;
                 prType = 'partial';
               } else {
                 const reviewerMentions = pr.requested_reviewers.map(r => getSlackMention(r.login));
-                statusMessage = `⏳ Waiting for review: ${reviewerMentions.join(', ')}`;
+                statusMessage = `Waiting for review: ${reviewerMentions.join(', ')}`;
                 prType = 'no_review';
               }
 
               let escalationNotice = '';
               if (severityConfig.notify.includes('tech_lead')) {
-                escalationNotice += '👨‍💼 Tech Lead notified | ';
+                escalationNotice += 'Tech lead notified | ';
               }
               if (severityConfig.notify.includes('manager')) {
-                escalationNotice += '👔 Manager notified | ';
+                escalationNotice += 'Manager notified | ';
               }
 
               pendingPRs.push({
@@ -165,8 +165,7 @@ jobs:
                 minutes_elapsed: Math.round(minutesElapsed),
                 hours_elapsed: Math.round(hoursElapsed * 10) / 10,
                 severity: severity,
-                severity_emoji: severityConfig.emoji,
-                severity_label: severityConfig.severity,
+                severity_label: severity.toUpperCase(),
                 status_message: statusMessage,
                 escalation_notice: escalationNotice,
                 pr_type: prType,
@@ -176,7 +175,7 @@ jobs:
               });
             }
 
-            console.log(`\n📊 Total pending PRs: ${pendingPRs.length}`);
+            console.log(`\nTotal pending PRs: ${pendingPRs.length}`);
             core.setOutput('pending_prs', JSON.stringify(pendingPRs));
             core.setOutput('should_notify', (pendingPRs.length > 0).toString());
             core.setOutput('count', pendingPRs.length);
@@ -198,15 +197,15 @@ jobs:
                 type: "header",
                 text: {
                   type: "plain_text",
-                  text: `⏰ PR Review Reminder — ${pendingPRs.length} PR(s) Pending`,
-                  emoji: true
+                  text: `PR Review Reminder — ${pendingPRs.length} PR(s) Pending`,
+                  emoji: false
                 }
               },
               {
                 type: "context",
                 elements: [{
                   type: "mrkdwn",
-                  text: `📅 ${new Date().toUTCString()}`
+                  text: `${new Date().toUTCString()}`
                 }]
               },
               { type: "divider" }
@@ -217,19 +216,19 @@ jobs:
                 type: "section",
                 text: {
                   type: "mrkdwn",
-                  text: `${pr.severity_emoji} *<${pr.url}|#${pr.number}: ${pr.title}>*\n` +
-                        `👤 Author: ${pr.author_mention}\n` +
+                  text: `[${pr.severity_label}] *<${pr.url}|#${pr.number}: ${pr.title}>*\n` +
+                        `Author: ${pr.author_mention}\n` +
                         `${pr.status_message}\n` +
-                        `⏰ Pending: *${pr.minutes_elapsed} minutes* (${pr.hours_elapsed}h)\n` +
-                        `📊 +${pr.additions}/-${pr.deletions} | ${pr.changed_files} files\n` +
-                        (pr.escalation_notice ? `🚨 ${pr.escalation_notice}` : '')
+                        `Pending: *${pr.minutes_elapsed} min* (${pr.hours_elapsed}h)\n` +
+                        `+${pr.additions}/-${pr.deletions} | ${pr.changed_files} files` +
+                        (pr.escalation_notice ? `\nEscalation: ${pr.escalation_notice}` : '')
                 },
                 accessory: {
                   type: "button",
                   text: {
                     type: "plain_text",
                     text: "Review Now",
-                    emoji: true
+                    emoji: false
                   },
                   url: `${pr.url}/files`,
                   style: ['high', 'critical'].includes(pr.severity) ? "danger" : "primary"
@@ -250,14 +249,14 @@ jobs:
               type: "context",
               elements: [{
                 type: "mrkdwn",
-                text: `📈 🚨 Critical: ${summary.critical} | 🔴 High: ${summary.high} | 🟡 Medium: ${summary.medium} | 🟢 Low: ${summary.low}`
+                text: `Summary — Critical: ${summary.critical} | High: ${summary.high} | Medium: ${summary.medium} | Low: ${summary.low}`
               }]
             });
 
             const payload = { blocks };
 
             if (process.env.DRY_RUN === 'true') {
-              console.log('🏃 DRY RUN — Message preview:');
+              console.log('DRY RUN — Message preview:');
               console.log(JSON.stringify(payload, null, 2));
               return;
             }
@@ -281,7 +280,7 @@ jobs:
               req.end();
             });
 
-            console.log(`✅ Slack response: ${result}`);
+            console.log(`Slack response: ${result}`);
 
       - name: Update PR Labels
         if: steps.pending-prs.outputs.should_notify == 'true'
@@ -323,8 +322,8 @@ jobs:
                   issue_number: pr.number,
                   labels: [newLabel]
                 });
-                console.log(`✅ PR #${pr.number} → ${newLabel}`);
+                console.log(`PR #${pr.number} labeled ${newLabel}`);
               } catch (e) {
-                console.log(`⚠️ Could not add label: ${e.message}`);
+                console.log(`Could not add label to PR #${pr.number}: ${e.message}`);
               }
             }

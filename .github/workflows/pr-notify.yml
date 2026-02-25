@@ -4,7 +4,7 @@ on:
   pull_request:
     types: [opened, reopened, review_requested, ready_for_review]
 
-permissions: 
+permissions:
   contents: read
   pull-requests: write
   issues: write
@@ -63,9 +63,9 @@ jobs:
             const deletions = files.reduce((sum, f) => sum + f.deletions, 0);
             const totalChanges = additions + deletions;
 
-            let size = '🟢 Small';
-            if (totalChanges > 500) size = '🔴 Large';
-            else if (totalChanges > 200) size = '🟡 Medium';
+            let size = 'Small';
+            if (totalChanges > 500) size = 'Large';
+            else if (totalChanges > 200) size = 'Medium';
 
             // Set all outputs
             core.setOutput('pr_number', pr.number);
@@ -93,8 +93,8 @@ jobs:
                   "type": "header",
                   "text": {
                     "type": "plain_text",
-                    "text": "🆕 New Pull Request Needs Review",
-                    "emoji": true
+                    "text": "Pull Request — Review Requested",
+                    "emoji": false
                   }
                 },
                 {
@@ -109,27 +109,27 @@ jobs:
                   "fields": [
                     {
                       "type": "mrkdwn",
-                      "text": "*👤 Author:*\n${{ steps.pr-info.outputs.author_mention }}"
+                      "text": "*Author:*\n${{ steps.pr-info.outputs.author_mention }}"
                     },
                     {
                       "type": "mrkdwn",
-                      "text": "*👀 Reviewers:*\n${{ steps.pr-info.outputs.reviewer_mentions }}"
+                      "text": "*Reviewers:*\n${{ steps.pr-info.outputs.reviewer_mentions }}"
                     },
                     {
                       "type": "mrkdwn",
-                      "text": "*🌿 Branch:*\n`${{ steps.pr-info.outputs.branch }}` → `${{ steps.pr-info.outputs.base }}`"
+                      "text": "*Branch:*\n`${{ steps.pr-info.outputs.branch }}` into `${{ steps.pr-info.outputs.base }}`"
                     },
                     {
                       "type": "mrkdwn",
-                      "text": "*📊 Size:*\n${{ steps.pr-info.outputs.size }}"
+                      "text": "*Size:*\n${{ steps.pr-info.outputs.size }}"
                     },
                     {
                       "type": "mrkdwn",
-                      "text": "*📁 Files Changed:*\n${{ steps.pr-info.outputs.files_changed }}"
+                      "text": "*Files Changed:*\n${{ steps.pr-info.outputs.files_changed }}"
                     },
                     {
                       "type": "mrkdwn",
-                      "text": "*📈 Changes:*\n+${{ steps.pr-info.outputs.additions }} / -${{ steps.pr-info.outputs.deletions }}"
+                      "text": "*Lines Changed:*\n+${{ steps.pr-info.outputs.additions }} / -${{ steps.pr-info.outputs.deletions }}"
                     }
                   ]
                 },
@@ -141,7 +141,7 @@ jobs:
                   "elements": [
                     {
                       "type": "mrkdwn",
-                      "text": "🟢 Severity: *LOW* | ⏰ Reminders will start if review is pending"
+                      "text": "Severity: *LOW* | Reminders will follow if review remains pending"
                     }
                   ]
                 },
@@ -152,8 +152,8 @@ jobs:
                       "type": "button",
                       "text": {
                         "type": "plain_text",
-                        "text": "📝 Review PR",
-                        "emoji": true
+                        "text": "Review PR",
+                        "emoji": false
                       },
                       "url": "${{ steps.pr-info.outputs.url }}/files",
                       "style": "primary"
@@ -162,8 +162,8 @@ jobs:
                       "type": "button",
                       "text": {
                         "type": "plain_text",
-                        "text": "💬 View Discussion",
-                        "emoji": true
+                        "text": "View Discussion",
+                        "emoji": false
                       },
                       "url": "${{ steps.pr-info.outputs.url }}"
                     }
@@ -184,11 +184,11 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.payload.pull_request.number,
-              body: `📢 **Slack Notification Sent!**\n\n` +
+              body: `**Slack Notification Sent**\n\n` +
                     `A review request has been posted to Slack.\n\n` +
                     `**Escalation Timeline (Demo Mode):**\n` +
-                    `- 🟢 0-5 min: Channel notification\n` +
-                    `- 🟡 5-10 min: MEDIUM severity\n` +
-                    `- 🔴 10-20 min: HIGH severity\n` +
-                    `- 🚨 20+ min: CRITICAL severity\n`
+                    `- 0–5 min: Channel notification (LOW)\n` +
+                    `- 5–10 min: MEDIUM severity\n` +
+                    `- 10–20 min: HIGH severity\n` +
+                    `- 20+ min: CRITICAL severity\n`
             });
