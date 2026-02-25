@@ -68,7 +68,7 @@ jobs:
               });
             }
 
-            console.log('📡 Fetching channel members...');
+            console.log('Fetching channel members...');
             console.log(`Channel ID: ${process.env.CHANNEL_ID}`);
 
             const channelResponse = await slackAPI('conversations.members', {
@@ -82,7 +82,7 @@ jobs:
             }
 
             const memberIds = channelResponse.members;
-            console.log(`👥 Found ${memberIds.length} members in channel\n`);
+            console.log(`Found ${memberIds.length} members in channel\n`);
 
             const teamMembers = {};
 
@@ -94,14 +94,14 @@ jobs:
               });
 
               if (!userResponse.ok) {
-                console.log(`  ⚠️ Could not fetch: ${userResponse.error}`);
+                console.log(`  Could not fetch: ${userResponse.error}`);
                 continue;
               }
 
               const user = userResponse.user;
 
               if (user.is_bot || user.id === 'USLACKBOT') {
-                console.log(`  🤖 Skipping bot: ${user.name}`);
+                console.log(`  Skipping bot: ${user.name}`);
                 continue;
               }
 
@@ -130,14 +130,14 @@ jobs:
                 timezone: user.tz || 'Unknown'
               };
 
-              console.log(`  ✅ ${profile.real_name || displayName}`);
+              console.log(`  Added: ${profile.real_name || displayName}`);
               console.log(`     Slack ID: ${user.id}`);
               console.log(`     Title: ${profile.title || 'Not set'}`);
               console.log(`     Role: ${role}`);
               console.log(`     Timezone: ${user.tz || 'Unknown'}\n`);
             }
 
-            console.log(`\n📊 Total team members: ${Object.keys(teamMembers).length}`);
+            console.log(`\nTotal team members: ${Object.keys(teamMembers).length}`);
             core.setOutput('team_members', JSON.stringify(teamMembers));
             core.setOutput('member_count', Object.keys(teamMembers).length);
 
@@ -150,11 +150,8 @@ jobs:
           script: |
             const fs = require('fs');
 
-            // ========================================
-            // FIX: Properly check dry run
-            // ========================================
             const isDryRun = process.env.IS_DRY_RUN === 'true';
-            console.log(`🔧 Dry run mode: ${isDryRun}`);
+            console.log(`Dry run mode: ${isDryRun}`);
 
             const configPath = '.github/config/team-config.json';
             const currentConfig = JSON.parse(
@@ -192,7 +189,7 @@ jobs:
                   email: memberData.email,
                   timezone: memberData.timezone
                 };
-                console.log(`🔄 Updated existing: ${key}`);
+                console.log(`Updated existing: ${key}`);
               } else {
                 updatedConfig.team_members[slackUsername] = {
                   slack_id: memberData.slack_id,
@@ -203,25 +200,22 @@ jobs:
                   github_username: 'NEEDS_MAPPING',
                   timezone: memberData.timezone
                 };
-                console.log(`➕ Added new: ${slackUsername} (${memberData.name})`);
+                console.log(`Added new: ${slackUsername} (${memberData.name})`);
               }
             }
 
-            console.log('\n📋 Updated team-config.json:\n');
+            console.log('\nUpdated team-config.json:\n');
             const prettyConfig = JSON.stringify(updatedConfig, null, 2);
             console.log(prettyConfig);
 
             if (isDryRun) {
-              console.log('\n🏃 DRY RUN — No changes written to file');
+              console.log('\nDRY RUN — No changes written to file');
               core.setOutput('updated', 'false');
               return;
             }
 
-            // ========================================
-            // WRITE THE FILE FOR REAL
-            // ========================================
             fs.writeFileSync(configPath, prettyConfig + '\n');
-            console.log('\n✅ team-config.json UPDATED AND SAVED!');
+            console.log('\nteam-config.json updated and saved');
             core.setOutput('updated', 'true');
 
       - name: Commit and Push Changes
@@ -233,11 +227,11 @@ jobs:
           git add .github/config/team-config.json
 
           if git diff --staged --quiet; then
-            echo "📭 No changes to commit"
+            echo "No changes to commit"
           else
             git commit -m "Auto-sync team config from Slack [skip ci]"
             git push origin main
-            echo "✅ Changes committed and pushed!"
+            echo "Changes committed and pushed"
           fi
 
       - name: Post Summary to Slack
@@ -251,7 +245,7 @@ jobs:
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": "🔄 *Team Config Auto-Synced!*\n\n👥 Members synced: ${{ steps.fetch-members.outputs.member_count }}\n📅 Time: Just now\n\n_Config updated from Slack channel automatically._"
+                    "text": "*Team Config Synced*\n\nMembers synced: ${{ steps.fetch-members.outputs.member_count }}\nTimestamp: <!date^${{ steps.fetch-members.outputs.member_count }}^{date_short_pretty} {time}|just now>\n\nConfig updated from Slack channel automatically."
                   }
                 }
               ]
