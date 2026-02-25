@@ -52,49 +52,38 @@ jobs:
             for (const pr of pullRequests) {
               console.log(`\nChecking PR #${pr.number}: ${pr.title}`);
 
-              // Skip drafts
               if (pr.draft) {
                 console.log(`  Skipping: draft`);
                 continue;
               }
 
-              // Skip PRs with opt-out labels
               const skipLabels = ['no-reminder', 'wip', 'on-hold'];
               if (pr.labels.some(l => skipLabels.includes(l.name))) {
                 console.log(`  Skipping: has opt-out label`);
                 continue;
               }
 
-              // ========================================
-              // CHECK REVIEWS
-              // ========================================
               const { data: reviews } = await github.rest.pulls.listReviews({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 pull_number: pr.number
               });
 
-              // Filter out the PR author's own reviews (if any)
               const reviewsByOthers = reviews.filter(
                 r => r.user.login !== pr.user.login
               );
 
               if (reviewsByOthers.length > 0) {
                 console.log(`  Skipping: has ${reviewsByOthers.length} review(s) from others`);
-                console.log(`    Reviewers: ${reviewsByOthers.map(r => r.user.login).join(', ')}`);
                 continue;
               }
 
-              // ========================================
-              // CHECK COMMENTS (regular PR comments)
-              // ========================================
               const { data: comments } = await github.rest.issues.listComments({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: pr.number
               });
 
-              // Filter out bot comments and PR author's own comments
               const commentsByOthers = comments.filter(
                 c => c.user.login !== pr.user.login &&
                      c.user.type !== 'Bot' &&
@@ -103,13 +92,9 @@ jobs:
 
               if (commentsByOthers.length > 0) {
                 console.log(`  Skipping: has ${commentsByOthers.length} comment(s) from others`);
-                console.log(`    Commenters: ${commentsByOthers.map(c => c.user.login).join(', ')}`);
                 continue;
               }
 
-              // ========================================
-              // CHECK REVIEW COMMENTS (inline code comments)
-              // ========================================
               const { data: reviewComments } = await github.rest.pulls.listReviewComments({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -122,19 +107,11 @@ jobs:
 
               if (reviewCommentsByOthers.length > 0) {
                 console.log(`  Skipping: has ${reviewCommentsByOthers.length} inline review comment(s)`);
-                console.log(`    Commenters: ${reviewCommentsByOthers.map(c => c.user.login).join(', ')}`);
                 continue;
               }
 
-              // ========================================
-              // IF WE REACH HERE: PR is completely ignored
-              // No reviews, no comments, no inline comments
-              // ========================================
               console.log(`  PR is completely ignored — no reviews, no comments`);
 
-              // ========================================
-              // CALCULATE TIME ELAPSED
-              // ========================================
               const createdAt = new Date(pr.created_at);
               const now = new Date();
               const minutesElapsed = (now - createdAt) / (1000 * 60);
@@ -142,9 +119,6 @@ jobs:
 
               console.log(`  Minutes elapsed: ${Math.round(minutesElapsed)}`);
 
-              // ========================================
-              // DETERMINE SEVERITY
-              // ========================================
               let severity = 'low';
               let severityConfig = config.escalation_thresholds.low;
 
@@ -162,9 +136,6 @@ jobs:
 
               console.log(`  Severity: ${severity}`);
 
-              // ========================================
-              // BUILD SLACK MESSAGE DATA
-              // ========================================
               function getSlackMention(githubUsername) {
                 const member = config.team_members[githubUsername];
                 return member ? `<@${member.slack_id}>` : `@${githubUsername}`;
@@ -172,7 +143,6 @@ jobs:
 
               const authorMention = getSlackMention(pr.user.login);
 
-              // Check if reviewers are assigned
               const hasReviewers = pr.requested_reviewers.length > 0;
 
               let statusMessage = '';
@@ -183,14 +153,6 @@ jobs:
                 statusMessage = `Waiting for review from: ${reviewerMentions.join(', ')} — no activity yet`;
               } else {
                 statusMessage = 'No reviewers assigned and no activity. Someone should pick this up.';
-              }
-
-              let escalationNotice = '';
-              if (severityConfig.notify.includes('tech_lead')) {
-                escalationNotice += 'Tech lead notified | ';
-              }
-              if (severityConfig.notify.includes('manager')) {
-                escalationNotice += 'Manager notified | ';
               }
 
               pendingPRs.push({
@@ -204,7 +166,6 @@ jobs:
                 severity: severity,
                 severity_label: severity.toUpperCase(),
                 status_message: statusMessage,
-                escalation_notice: escalationNotice,
                 additions: pr.additions || 0,
                 deletions: pr.deletions || 0,
                 changed_files: pr.changed_files || 0
@@ -256,8 +217,7 @@ jobs:
                         `Author: ${pr.author_mention}\n` +
                         `${pr.status_message}\n` +
                         `Pending: *${pr.minutes_elapsed} min* (${pr.hours_elapsed}h)\n` +
-                        `+${pr.additions}/-${pr.deletions} | ${pr.changed_files} files` +
-                        (pr.escalation_notice ? `\nEscalation: ${pr.escalation_notice}` : '')
+                        `+${pr.additions}/-${pr.deletions} | ${pr.changed_files} files`
                 },
                 accessory: {
                   type: "button",
