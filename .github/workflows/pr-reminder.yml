@@ -29,14 +29,66 @@ jobs:
       - name: Find Pending PRs and Calculate Severity
         id: pending-prs
         uses: actions/github-script@v7
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
+            const https = require('https');
+
             const config = JSON.parse(
               fs.readFileSync('.github/config/team-config.json', 'utf8')
             );
 
+            // ========================================
+            // GEMINI API HELPER
+            // ========================================
+            async function callGemini(prompt) {
+              const apiKey = process.env.GEMINI_API_KEY;
+              if (!apiKey) return null;
+
+              const url = `/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+
+              const requestBody = JSON.stringify({
+                contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: {
+                  temperature: 0.8,
+                  maxOutputTokens: 150
+                }
+              });
+
+              return new Promise((resolve) => {
+                const req = https.request({
+                  hostname: 'generativelanguage.googleapis.com',
+                  path: url,
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' }
+                }, (res) => {
+                  let data = '';
+                  res.on('data', chunk => data += chunk);
+                  res.on('end', () => {
+                    try {
+                      const parsed = JSON.parse(data);
+                      if (parsed.candidates && parsed.candidates[0]) {
+                        resolve(parsed.candidates[0].content.parts[0].text.trim());
+                      } else {
+                        resolve(null);
+                      }
+                    } catch (e) {
+                      resolve(null);
+                    }
+                  });
+                });
+                req.on('error', () => resolve(null));
+                req.write(requestBody);
+                req.end();
+              });
+            }
+
+            // ========================================
+            // FETCH OPEN PRs
+            // ========================================
             const { data: pullRequests } = await github.rest.pulls.list({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -74,7 +126,7 @@ jobs:
               );
 
               if (reviewsByOthers.length > 0) {
-                console.log(`  Skipping: has ${reviewsByOthers.length} review(s) from others`);
+                console.log(`  Skipping: has ${reviewsByOthers.length} review(s)`);
                 continue;
               }
 
@@ -91,7 +143,7 @@ jobs:
               );
 
               if (commentsByOthers.length > 0) {
-                console.log(`  Skipping: has ${commentsByOthers.length} comment(s) from others`);
+                console.log(`  Skipping: has ${commentsByOthers.length} comment(s)`);
                 continue;
               }
 
@@ -106,11 +158,11 @@ jobs:
               );
 
               if (reviewCommentsByOthers.length > 0) {
-                console.log(`  Skipping: has ${reviewCommentsByOthers.length} inline review comment(s)`);
+                console.log(`  Skipping: has ${reviewCommentsByOthers.length} inline comment(s)`);
                 continue;
               }
 
-              console.log(`  PR is completely ignored — no reviews, no comments`);
+              console.log(`  PR is completely ignored`);
 
               const createdAt = new Date(pr.created_at);
               const now = new Date();
@@ -120,18 +172,13 @@ jobs:
               console.log(`  Minutes elapsed: ${Math.round(minutesElapsed)}`);
 
               let severity = 'low';
-              let severityConfig = config.escalation_thresholds.low;
-
               const thresholds = config.escalation_thresholds;
               if (minutesElapsed >= thresholds.critical.minutes) {
                 severity = 'critical';
-                severityConfig = thresholds.critical;
               } else if (minutesElapsed >= thresholds.high.minutes) {
                 severity = 'high';
-                severityConfig = thresholds.high;
               } else if (minutesElapsed >= thresholds.medium.minutes) {
                 severity = 'medium';
-                severityConfig = thresholds.medium;
               }
 
               console.log(`  Severity: ${severity}`);
@@ -143,16 +190,49 @@ jobs:
 
               const authorMention = getSlackMention(pr.user.login);
 
-              const hasReviewers = pr.requested_reviewers.length > 0;
+              // ========================================
+              // GENERATE AI MESSAGE
+              // ========================================
+              const prompt = `You are a Slack bot reminding a software team to review a pull request that has been ignored. Generate a short reminder message (2-3 sentences).
+
+              Context:
+              - PR title: "${pr.title}"
+              - Author: ${pr.user.login}
+              - Pending for: ${Math.round(minutesElapsed)} minutes
+              - Severity: ${severity.toUpperCase()}
+              - Files changed: ${pr.changed_files || 0}
+              - Lines: +${pr.additions || 0}/-${pr.deletions || 0}
+              - No one has reviewed, commented, or even looked at this PR
+
+              Rules:
+              - Severity LOW: gentle, friendly nudge
+              - Severity MEDIUM: slightly more urgent, mention the time
+              - Severity HIGH: firm but professional, emphasize this is blocking work
+              - Severity CRITICAL: urgent tone, this has been waiting way too long
+              - Do NOT use emojis
+              - Do NOT include PR links
+              - Do NOT use markdown
+              - Keep it plain text, 2-3 sentences max
+              - Be creative, vary your messages, don't be repetitive`;
+
+              console.log('  Calling Gemini API...');
+              const aiMessage = await callGemini(prompt);
 
               let statusMessage = '';
-              if (hasReviewers) {
-                const reviewerMentions = pr.requested_reviewers.map(
-                  r => getSlackMention(r.login)
-                );
-                statusMessage = `Waiting for review from: ${reviewerMentions.join(', ')} — no activity yet`;
+              if (aiMessage) {
+                console.log(`  AI message: ${aiMessage}`);
+                statusMessage = aiMessage;
               } else {
-                statusMessage = 'No reviewers assigned and no activity. Someone should pick this up.';
+                console.log('  AI unavailable, using fallback');
+                const hasReviewers = pr.requested_reviewers.length > 0;
+                if (hasReviewers) {
+                  const reviewerMentions = pr.requested_reviewers.map(
+                    r => getSlackMention(r.login)
+                  );
+                  statusMessage = `Waiting for review from: ${reviewerMentions.join(', ')} — no activity yet`;
+                } else {
+                  statusMessage = 'No reviewers assigned and no activity. Someone should pick this up.';
+                }
               }
 
               pendingPRs.push({
@@ -172,7 +252,7 @@ jobs:
               });
             }
 
-            console.log(`\nTotal ignored PRs needing attention: ${pendingPRs.length}`);
+            console.log(`\nTotal ignored PRs: ${pendingPRs.length}`);
             core.setOutput('pending_prs', JSON.stringify(pendingPRs));
             core.setOutput('should_notify', (pendingPRs.length > 0).toString());
             core.setOutput('count', pendingPRs.length);
@@ -215,8 +295,7 @@ jobs:
                   type: "mrkdwn",
                   text: `[${pr.severity_label}] *<${pr.url}|#${pr.number}: ${pr.title}>*\n` +
                         `Author: ${pr.author_mention}\n` +
-                        `${pr.status_message}\n` +
-                        `Pending: *${pr.minutes_elapsed} min* (${pr.hours_elapsed}h)\n` +
+                        `Pending: *${pr.minutes_elapsed} min* (${pr.hours_elapsed}h) | ` +
                         `+${pr.additions}/-${pr.deletions} | ${pr.changed_files} files`
                 },
                 accessory: {
@@ -229,6 +308,15 @@ jobs:
                   url: `${pr.url}/files`,
                   style: ['high', 'critical'].includes(pr.severity) ? "danger" : "primary"
                 }
+              });
+
+              // AI generated message as a separate block
+              blocks.push({
+                type: "context",
+                elements: [{
+                  type: "mrkdwn",
+                  text: `_${pr.status_message}_`
+                }]
               });
 
               blocks.push({ type: "divider" });
@@ -320,6 +408,6 @@ jobs:
                 });
                 console.log(`PR #${pr.number} labeled ${newLabel}`);
               } catch (e) {
-                console.log(`Could not add label to PR #${pr.number}: ${e.message}`);
+                console.log(`Could not add label: ${e.message}`);
               }
             }
