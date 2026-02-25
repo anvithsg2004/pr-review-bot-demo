@@ -52,52 +52,89 @@ jobs:
             for (const pr of pullRequests) {
               console.log(`\nChecking PR #${pr.number}: ${pr.title}`);
 
+              // Skip drafts
               if (pr.draft) {
                 console.log(`  Skipping: draft`);
                 continue;
               }
 
+              // Skip PRs with opt-out labels
               const skipLabels = ['no-reminder', 'wip', 'on-hold'];
               if (pr.labels.some(l => skipLabels.includes(l.name))) {
                 console.log(`  Skipping: has opt-out label`);
                 continue;
               }
 
+              // ========================================
+              // CHECK REVIEWS
+              // ========================================
               const { data: reviews } = await github.rest.pulls.listReviews({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 pull_number: pr.number
               });
 
-              const latestReviews = {};
-              for (const r of reviews) {
-                if (!latestReviews[r.user.login] ||
-                    new Date(r.submitted_at) > new Date(latestReviews[r.user.login].submitted_at)) {
-                  latestReviews[r.user.login] = r;
-                }
-              }
+              // Filter out the PR author's own reviews (if any)
+              const reviewsByOthers = reviews.filter(
+                r => r.user.login !== pr.user.login
+              );
 
-              const approvals = Object.values(latestReviews)
-                .filter(r => r.state === 'APPROVED');
-              const changesRequested = Object.values(latestReviews)
-                .filter(r => r.state === 'CHANGES_REQUESTED');
-              const stillPending = pr.requested_reviewers
-                .filter(r => !latestReviews[r.login]);
-
-              if (stillPending.length === 0 &&
-                  changesRequested.length === 0 &&
-                  approvals.length > 0) {
-                console.log(`  Skipping: fully approved`);
+              if (reviewsByOthers.length > 0) {
+                console.log(`  Skipping: has ${reviewsByOthers.length} review(s) from others`);
+                console.log(`    Reviewers: ${reviewsByOthers.map(r => r.user.login).join(', ')}`);
                 continue;
               }
 
-              const hasNoReviewers = pr.requested_reviewers.length === 0 &&
-                                     Object.keys(latestReviews).length === 0;
+              // ========================================
+              // CHECK COMMENTS (regular PR comments)
+              // ========================================
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number
+              });
 
-              if (hasNoReviewers) {
-                console.log(`  No reviewers assigned — will still send reminder`);
+              // Filter out bot comments and PR author's own comments
+              const commentsByOthers = comments.filter(
+                c => c.user.login !== pr.user.login &&
+                     c.user.type !== 'Bot' &&
+                     !c.body.includes('Slack Notification Sent')
+              );
+
+              if (commentsByOthers.length > 0) {
+                console.log(`  Skipping: has ${commentsByOthers.length} comment(s) from others`);
+                console.log(`    Commenters: ${commentsByOthers.map(c => c.user.login).join(', ')}`);
+                continue;
               }
 
+              // ========================================
+              // CHECK REVIEW COMMENTS (inline code comments)
+              // ========================================
+              const { data: reviewComments } = await github.rest.pulls.listReviewComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number
+              });
+
+              const reviewCommentsByOthers = reviewComments.filter(
+                c => c.user.login !== pr.user.login
+              );
+
+              if (reviewCommentsByOthers.length > 0) {
+                console.log(`  Skipping: has ${reviewCommentsByOthers.length} inline review comment(s)`);
+                console.log(`    Commenters: ${reviewCommentsByOthers.map(c => c.user.login).join(', ')}`);
+                continue;
+              }
+
+              // ========================================
+              // IF WE REACH HERE: PR is completely ignored
+              // No reviews, no comments, no inline comments
+              // ========================================
+              console.log(`  PR is completely ignored — no reviews, no comments`);
+
+              // ========================================
+              // CALCULATE TIME ELAPSED
+              // ========================================
               const createdAt = new Date(pr.created_at);
               const now = new Date();
               const minutesElapsed = (now - createdAt) / (1000 * 60);
@@ -105,6 +142,9 @@ jobs:
 
               console.log(`  Minutes elapsed: ${Math.round(minutesElapsed)}`);
 
+              // ========================================
+              // DETERMINE SEVERITY
+              // ========================================
               let severity = 'low';
               let severityConfig = config.escalation_thresholds.low;
 
@@ -122,6 +162,9 @@ jobs:
 
               console.log(`  Severity: ${severity}`);
 
+              // ========================================
+              // BUILD SLACK MESSAGE DATA
+              // ========================================
               function getSlackMention(githubUsername) {
                 const member = config.team_members[githubUsername];
                 return member ? `<@${member.slack_id}>` : `@${githubUsername}`;
@@ -129,23 +172,17 @@ jobs:
 
               const authorMention = getSlackMention(pr.user.login);
 
-              let statusMessage = '';
-              let prType = 'pending';
+              // Check if reviewers are assigned
+              const hasReviewers = pr.requested_reviewers.length > 0;
 
-              if (hasNoReviewers) {
-                statusMessage = 'No reviewers assigned. A reviewer should be added or someone should pick this up.';
-                prType = 'no_reviewer';
-              } else if (changesRequested.length > 0 && stillPending.length === 0) {
-                statusMessage = `Changes requested — waiting on ${authorMention} to update`;
-                prType = 'changes_requested';
-              } else if (approvals.length > 0 && stillPending.length > 0) {
-                const reviewerMentions = stillPending.map(r => getSlackMention(r.login));
-                statusMessage = `${approvals.length} approved, still waiting on: ${reviewerMentions.join(', ')}`;
-                prType = 'partial';
+              let statusMessage = '';
+              if (hasReviewers) {
+                const reviewerMentions = pr.requested_reviewers.map(
+                  r => getSlackMention(r.login)
+                );
+                statusMessage = `Waiting for review from: ${reviewerMentions.join(', ')} — no activity yet`;
               } else {
-                const reviewerMentions = pr.requested_reviewers.map(r => getSlackMention(r.login));
-                statusMessage = `Waiting for review: ${reviewerMentions.join(', ')}`;
-                prType = 'no_review';
+                statusMessage = 'No reviewers assigned and no activity. Someone should pick this up.';
               }
 
               let escalationNotice = '';
@@ -168,14 +205,13 @@ jobs:
                 severity_label: severity.toUpperCase(),
                 status_message: statusMessage,
                 escalation_notice: escalationNotice,
-                pr_type: prType,
                 additions: pr.additions || 0,
                 deletions: pr.deletions || 0,
                 changed_files: pr.changed_files || 0
               });
             }
 
-            console.log(`\nTotal pending PRs: ${pendingPRs.length}`);
+            console.log(`\nTotal ignored PRs needing attention: ${pendingPRs.length}`);
             core.setOutput('pending_prs', JSON.stringify(pendingPRs));
             core.setOutput('should_notify', (pendingPRs.length > 0).toString());
             core.setOutput('count', pendingPRs.length);
@@ -197,7 +233,7 @@ jobs:
                 type: "header",
                 text: {
                   type: "plain_text",
-                  text: `PR Review Reminder — ${pendingPRs.length} PR(s) Pending`,
+                  text: `PR Review Reminder — ${pendingPRs.length} PR(s) with No Activity`,
                   emoji: false
                 }
               },
