@@ -4,6 +4,7 @@ class MessageQueue {
     }
 
     publish(topic, message) {
+        // `topic` is the name of the queue, `message` is the data to be stored
         if (!this.queues.has(topic)) {
             this.queues.set(topic, []);
         }
@@ -20,5 +21,7 @@ class MessageQueue {
         return queue.shift();
     }
 }
+
+
 
 module.exports = MessageQueue;
