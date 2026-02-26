@@ -23,19 +23,26 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Gather PR Information
-        id: pr-info
+      - name: Build and Send Notification
         uses: actions/github-script@v7
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
+            const https = require('https');
+
             const config = JSON.parse(
               fs.readFileSync('.github/config/team-config.json', 'utf8')
             );
 
             const pr = context.payload.pull_request;
 
+            // ========================================
+            // GATHER PR INFO
+            // ========================================
             const authorConfig = config.team_members[pr.user.login];
             const authorMention = authorConfig
               ? `<@${authorConfig.slack_id}>`
@@ -62,66 +69,37 @@ jobs:
 
             const fileNames = files.map(f => f.filename).join(', ');
 
-            const rawBody = (pr.body || 'No description provided').substring(0, 300);
-            const cleanBody = rawBody
+            const cleanBody = (pr.body || 'No description provided')
+              .substring(0, 300)
               .replace(/`/g, '')
               .replace(/\n/g, ' ')
               .replace(/\r/g, '')
-              .replace(/"/g, "'")
               .replace(/#/g, '')
               .replace(/\*/g, '')
-              .replace(/\|/g, '-')
               .trim();
 
-            core.setOutput('pr_number', pr.number);
-            core.setOutput('title', pr.title);
-            core.setOutput('url', pr.html_url);
-            core.setOutput('author', pr.user.login);
-            core.setOutput('author_mention', authorMention);
-            core.setOutput('reviewer_mentions', reviewerMentions);
-            core.setOutput('branch', pr.head.ref);
-            core.setOutput('base', pr.base.ref);
-            core.setOutput('files_changed', files.length);
-            core.setOutput('additions', additions);
-            core.setOutput('deletions', deletions);
-            core.setOutput('size', size);
-            core.setOutput('file_names', fileNames);
-            core.setOutput('body', cleanBody);
+            console.log('PR Title:', pr.title);
+            console.log('Author:', pr.user.login);
+            console.log('Size:', size);
+            console.log('Files:', fileNames);
 
-      - name: Generate AI Message
-        id: ai-message
-        uses: actions/github-script@v7
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          PR_TITLE: ${{ steps.pr-info.outputs.title }}
-          PR_AUTHOR: ${{ steps.pr-info.outputs.author }}
-          PR_BRANCH: ${{ steps.pr-info.outputs.branch }}
-          PR_BASE: ${{ steps.pr-info.outputs.base }}
-          PR_SIZE: ${{ steps.pr-info.outputs.size }}
-          PR_ADDITIONS: ${{ steps.pr-info.outputs.additions }}
-          PR_DELETIONS: ${{ steps.pr-info.outputs.deletions }}
-          PR_FILES_CHANGED: ${{ steps.pr-info.outputs.files_changed }}
-          PR_FILE_NAMES: ${{ steps.pr-info.outputs.file_names }}
-          PR_BODY: ${{ steps.pr-info.outputs.body }}
-        with:
-          script: |
-            const https = require('https');
-
+            // ========================================
+            // GEMINI API HELPER
+            // ========================================
             async function callGemini(prompt) {
               const apiKey = process.env.GEMINI_API_KEY;
               if (!apiKey) {
-                console.log('No Gemini API key found');
+                console.log('No Gemini API key');
                 return null;
               }
 
-              const url = `/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+              const url = '/v1beta/models/gemini-2.5-flash:generateContent?key=' + apiKey;
 
-              const requestBody = JSON.stringify({
+              const body = JSON.stringify({
                 contents: [{ parts: [{ text: prompt }] }],
                 generationConfig: {
                   temperature: 0.7,
-                  maxOutputTokens: 300,
-                  topP: 0.9
+                  maxOutputTokens: 300
                 }
               });
 
@@ -130,36 +108,30 @@ jobs:
                   hostname: 'generativelanguage.googleapis.com',
                   path: url,
                   method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json'
-                  }
+                  headers: { 'Content-Type': 'application/json' }
                 }, (res) => {
                   let data = '';
                   res.on('data', chunk => data += chunk);
                   res.on('end', () => {
                     try {
                       const parsed = JSON.parse(data);
-
                       if (parsed.error) {
-                        console.log('Gemini API error:', parsed.error.message);
+                        console.log('Gemini error:', parsed.error.message);
                         resolve(null);
                         return;
                       }
-
                       if (parsed.candidates &&
                           parsed.candidates[0] &&
                           parsed.candidates[0].content &&
                           parsed.candidates[0].content.parts &&
                           parsed.candidates[0].content.parts[0]) {
-                        const text = parsed.candidates[0].content.parts[0].text;
-                        resolve(text.trim());
+                        resolve(parsed.candidates[0].content.parts[0].text.trim());
                       } else {
-                        console.log('Unexpected Gemini response:', JSON.stringify(parsed).substring(0, 500));
+                        console.log('Unexpected response:', JSON.stringify(parsed).substring(0, 300));
                         resolve(null);
                       }
                     } catch (e) {
                       console.log('Parse error:', e.message);
-                      console.log('Raw response:', data.substring(0, 500));
                       resolve(null);
                     }
                   });
@@ -168,45 +140,47 @@ jobs:
                   console.log('Request error:', e.message);
                   resolve(null);
                 });
-                req.write(requestBody);
+                req.write(body);
                 req.end();
               });
             }
 
+            // ========================================
+            // GENERATE AI MESSAGE
+            // ========================================
             const prompt = [
               'You are a Slack notification bot for a software development team.',
               'Write exactly 2 to 3 sentences to inform the team that a new pull request has been created and needs their review.',
               '',
-              'Here are the pull request details:',
-              'Title: ' + process.env.PR_TITLE,
-              'Author: ' + process.env.PR_AUTHOR,
-              'Branch: ' + process.env.PR_BRANCH + ' merging into ' + process.env.PR_BASE,
-              'Size of change: ' + process.env.PR_SIZE + ' with ' + process.env.PR_ADDITIONS + ' lines added and ' + process.env.PR_DELETIONS + ' lines deleted',
-              'Number of files changed: ' + process.env.PR_FILES_CHANGED,
-              'File names: ' + process.env.PR_FILE_NAMES,
-              'Description from the author: ' + (process.env.PR_BODY || 'No description provided'),
+              'Pull request details:',
+              'Title: ' + pr.title,
+              'Author: ' + pr.user.login,
+              'Branch: ' + pr.head.ref + ' merging into ' + pr.base.ref,
+              'Size: ' + size + ' with ' + additions + ' lines added and ' + deletions + ' lines deleted',
+              'Files changed: ' + files.length,
+              'File names: ' + fileNames,
+              'Description: ' + cleanBody,
               '',
-              'Your message must follow these rules strictly:',
+              'Rules:',
               '1. Write exactly 2 to 3 complete sentences',
-              '2. Briefly describe what the PR changes based on the title and file names',
-              '3. Estimate how long the review might take based on the size',
-              '4. Ask the team to review it',
-              '5. Use a friendly and professional tone',
-              '6. Do NOT use any emojis',
-              '7. Do NOT include any links or URLs',
-              '8. Do NOT use any markdown formatting such as asterisks, underscores, backticks, or hash symbols',
-              '9. Write in plain English text only',
-              '10. Your response should contain ONLY the message text, nothing else'
+              '2. Briefly describe what the PR changes',
+              '3. Estimate review time based on size',
+              '4. Ask the team to review',
+              '5. Friendly and professional tone',
+              '6. No emojis',
+              '7. No links or URLs',
+              '8. No markdown formatting at all',
+              '9. Plain English text only',
+              '10. Output ONLY the message text'
             ].join('\n');
 
-            console.log('Sending prompt to Gemini...');
+            console.log('Calling Gemini...');
+            const aiResponse = await callGemini(prompt);
 
-            const aiMessage = await callGemini(prompt);
+            let aiMessage = '';
 
-            let finalMessage = '';
-
-            if (aiMessage) {
-              let cleaned = aiMessage
+            if (aiResponse) {
+              aiMessage = aiResponse
                 .replace(/\*/g, '')
                 .replace(/`/g, '')
                 .replace(/_/g, ' ')
@@ -214,132 +188,115 @@ jobs:
                 .replace(/#/g, '')
                 .replace(/\n+/g, ' ')
                 .replace(/\s+/g, ' ')
-                .replace(/"/g, "'")
                 .trim();
 
-              console.log('Raw AI response:', aiMessage);
-              console.log('Cleaned AI response:', cleaned);
-              console.log('Cleaned length:', cleaned.length);
+              console.log('AI response:', aiMessage);
+              console.log('Length:', aiMessage.length);
 
-              if (cleaned.length >= 50) {
-                finalMessage = cleaned;
-                console.log('Using AI message');
-              } else {
-                console.log('AI message too short, using fallback');
+              if (aiMessage.length < 50) {
+                console.log('Too short, using fallback');
+                aiMessage = '';
               }
             } else {
-              console.log('AI returned null, using fallback');
+              console.log('AI returned null');
             }
 
-            if (!finalMessage) {
-              finalMessage = 'A new pull request titled ' + process.env.PR_TITLE +
-                ' has been opened and is ready for review. It is a ' +
-                process.env.PR_SIZE.toLowerCase() + ' change touching ' +
-                process.env.PR_FILES_CHANGED + ' file(s). Please take a look when you have a moment.';
-              console.log('Using fallback:', finalMessage);
+            if (!aiMessage) {
+              aiMessage = 'A new pull request has been opened for ' + pr.title +
+                '. It is a ' + size.toLowerCase() + ' change with ' +
+                additions + ' lines added across ' + files.length +
+                ' file(s). Please review when you get a chance.';
+              console.log('Fallback:', aiMessage);
             }
 
-            core.setOutput('message', finalMessage);
-
-      - name: Send Slack Notification
-        uses: slackapi/slack-github-action@v1.26.0
-        with:
-          payload: |
-            {
-              "blocks": [
+            // ========================================
+            // BUILD SLACK PAYLOAD (all in JavaScript)
+            // ========================================
+            const payload = {
+              blocks: [
                 {
-                  "type": "header",
-                  "text": {
-                    "type": "plain_text",
-                    "text": "Pull Request — Review Requested",
-                    "emoji": false
+                  type: "header",
+                  text: {
+                    type: "plain_text",
+                    text: "Pull Request — Review Requested",
+                    emoji: false
                   }
                 },
                 {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": "*<${{ steps.pr-info.outputs.url }}|#${{ steps.pr-info.outputs.pr_number }}: ${{ steps.pr-info.outputs.title }}>*"
+                  type: "section",
+                  text: {
+                    type: "mrkdwn",
+                    text: `*<${pr.html_url}|#${pr.number}: ${pr.title}>*`
                   }
                 },
                 {
-                  "type": "section",
-                  "text": {
-                    "type": "plain_text",
-                    "text": ${{ toJSON(steps.ai-message.outputs.message) }},
-                    "emoji": false
+                  type: "section",
+                  text: {
+                    type: "plain_text",
+                    text: aiMessage,
+                    emoji: false
                   }
                 },
                 {
-                  "type": "section",
-                  "fields": [
-                    {
-                      "type": "mrkdwn",
-                      "text": "*Author:*\n${{ steps.pr-info.outputs.author_mention }}"
-                    },
-                    {
-                      "type": "mrkdwn",
-                      "text": "*Reviewers:*\n${{ steps.pr-info.outputs.reviewer_mentions }}"
-                    },
-                    {
-                      "type": "mrkdwn",
-                      "text": "*Branch:*\n`${{ steps.pr-info.outputs.branch }}` into `${{ steps.pr-info.outputs.base }}`"
-                    },
-                    {
-                      "type": "mrkdwn",
-                      "text": "*Size:*\n${{ steps.pr-info.outputs.size }}"
-                    },
-                    {
-                      "type": "mrkdwn",
-                      "text": "*Files Changed:*\n${{ steps.pr-info.outputs.files_changed }}"
-                    },
-                    {
-                      "type": "mrkdwn",
-                      "text": "*Lines Changed:*\n+${{ steps.pr-info.outputs.additions }} / -${{ steps.pr-info.outputs.deletions }}"
-                    }
+                  type: "section",
+                  fields: [
+                    { type: "mrkdwn", text: `*Author:*\n${authorMention}` },
+                    { type: "mrkdwn", text: `*Reviewers:*\n${reviewerMentions}` },
+                    { type: "mrkdwn", text: `*Branch:*\n\`${pr.head.ref}\` into \`${pr.base.ref}\`` },
+                    { type: "mrkdwn", text: `*Size:*\n${size}` },
+                    { type: "mrkdwn", text: `*Files Changed:*\n${files.length}` },
+                    { type: "mrkdwn", text: `*Lines Changed:*\n+${additions} / -${deletions}` }
                   ]
                 },
+                { type: "divider" },
                 {
-                  "type": "divider"
+                  type: "context",
+                  elements: [{
+                    type: "mrkdwn",
+                    text: "Severity: *LOW* | Reminders will follow if review remains pending"
+                  }]
                 },
                 {
-                  "type": "context",
-                  "elements": [
+                  type: "actions",
+                  elements: [
                     {
-                      "type": "mrkdwn",
-                      "text": "Severity: *LOW* | Reminders will follow if review remains pending"
-                    }
-                  ]
-                },
-                {
-                  "type": "actions",
-                  "elements": [
-                    {
-                      "type": "button",
-                      "text": {
-                        "type": "plain_text",
-                        "text": "Review PR",
-                        "emoji": false
-                      },
-                      "url": "${{ steps.pr-info.outputs.url }}/files",
-                      "style": "primary"
+                      type: "button",
+                      text: { type: "plain_text", text: "Review PR", emoji: false },
+                      url: pr.html_url + '/files',
+                      style: "primary"
                     },
                     {
-                      "type": "button",
-                      "text": {
-                        "type": "plain_text",
-                        "text": "View Discussion",
-                        "emoji": false
-                      },
-                      "url": "${{ steps.pr-info.outputs.url }}"
+                      type: "button",
+                      text: { type: "plain_text", text: "View Discussion", emoji: false },
+                      url: pr.html_url
                     }
                   ]
                 }
               ]
-            }
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+            };
+
+            // ========================================
+            // SEND TO SLACK (directly from JavaScript)
+            // ========================================
+            const webhookUrl = new URL(process.env.SLACK_WEBHOOK_URL);
+
+            const slackResult = await new Promise((resolve, reject) => {
+              const req = https.request({
+                hostname: webhookUrl.hostname,
+                path: webhookUrl.pathname,
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+              }, (res) => {
+                let data = '';
+                res.on('data', chunk => data += chunk);
+                res.on('end', () => resolve(data));
+              });
+              req.on('error', reject);
+              req.write(JSON.stringify(payload));
+              req.end();
+            });
+
+            console.log('Slack response:', slackResult);
 
       - name: Comment on PR
         uses: actions/github-script@v7
