@@ -36,9 +36,6 @@ jobs:
 
             const pr = context.payload.pull_request;
 
-            const reviewers = pr.requested_reviewers
-              .map(r => r.login).join(', ') || 'None assigned';
-
             const authorConfig = config.team_members[pr.user.login];
             const authorMention = authorConfig
               ? `<@${authorConfig.slack_id}>`
@@ -63,8 +60,19 @@ jobs:
             if (totalChanges > 500) size = 'Large';
             else if (totalChanges > 200) size = 'Medium';
 
-            // Get file names for AI context
             const fileNames = files.map(f => f.filename).join(', ');
+
+            // Sanitize description — remove backticks and special chars
+            const rawBody = (pr.body || 'No description provided').substring(0, 300);
+            const cleanBody = rawBody
+              .replace(/`/g, '')
+              .replace(/\n/g, ' ')
+              .replace(/\r/g, '')
+              .replace(/"/g, "'")
+              .replace(/#/g, '')
+              .replace(/\*/g, '')
+              .replace(/\|/g, '-')
+              .trim();
 
             core.setOutput('pr_number', pr.number);
             core.setOutput('title', pr.title);
@@ -79,44 +87,45 @@ jobs:
             core.setOutput('deletions', deletions);
             core.setOutput('size', size);
             core.setOutput('file_names', fileNames);
-            core.setOutput('body', (pr.body || 'No description').substring(0, 300));
+            core.setOutput('body', cleanBody);
 
       - name: Generate AI Message
         id: ai-message
         uses: actions/github-script@v7
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PR_TITLE: ${{ steps.pr-info.outputs.title }}
+          PR_AUTHOR: ${{ steps.pr-info.outputs.author }}
+          PR_BRANCH: ${{ steps.pr-info.outputs.branch }}
+          PR_BASE: ${{ steps.pr-info.outputs.base }}
+          PR_SIZE: ${{ steps.pr-info.outputs.size }}
+          PR_ADDITIONS: ${{ steps.pr-info.outputs.additions }}
+          PR_DELETIONS: ${{ steps.pr-info.outputs.deletions }}
+          PR_FILES_CHANGED: ${{ steps.pr-info.outputs.files_changed }}
+          PR_FILE_NAMES: ${{ steps.pr-info.outputs.file_names }}
+          PR_BODY: ${{ steps.pr-info.outputs.body }}
         with:
           script: |
             const https = require('https');
 
-            // ========================================
-            // CALL GEMINI API
-            // ========================================
             async function callGemini(prompt) {
               const apiKey = process.env.GEMINI_API_KEY;
               const url = `/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
               const requestBody = JSON.stringify({
-                contents: [{
-                  parts: [{
-                    text: prompt
-                  }]
-                }],
+                contents: [{ parts: [{ text: prompt }] }],
                 generationConfig: {
                   temperature: 0.7,
                   maxOutputTokens: 200
                 }
               });
 
-              return new Promise((resolve, reject) => {
+              return new Promise((resolve) => {
                 const req = https.request({
                   hostname: 'generativelanguage.googleapis.com',
                   path: url,
                   method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json'
-                  }
+                  headers: { 'Content-Type': 'application/json' }
                 }, (res) => {
                   let data = '';
                   res.on('data', chunk => data += chunk);
@@ -145,34 +154,46 @@ jobs:
               });
             }
 
-            // ========================================
-            // BUILD PROMPT
-            // ========================================
-            const prompt = `You are a helpful Slack bot for a software engineering team. Generate a short, professional message (2-3 sentences) to notify the team about a new pull request that needs review.
+            // Build prompt using environment variables (safe from special chars)
+            const prompt = [
+              'You are a helpful Slack bot for a software engineering team.',
+              'Generate a short, professional message (2-3 sentences) to notify the team about a new pull request that needs review.',
+              '',
+              'PR Details:',
+              '- Title: ' + process.env.PR_TITLE,
+              '- Author: ' + process.env.PR_AUTHOR,
+              '- Branch: ' + process.env.PR_BRANCH + ' into ' + process.env.PR_BASE,
+              '- Size: ' + process.env.PR_SIZE + ' (' + process.env.PR_ADDITIONS + ' additions, ' + process.env.PR_DELETIONS + ' deletions)',
+              '- Files changed: ' + process.env.PR_FILES_CHANGED,
+              '- Files: ' + process.env.PR_FILE_NAMES,
+              '- Description: ' + process.env.PR_BODY,
+              '',
+              'Rules:',
+              '- Keep it concise and friendly',
+              '- Mention what the PR is about based on the title and files',
+              '- Suggest how long the review might take based on size',
+              '- Do NOT use emojis',
+              '- Do NOT include the PR link (it will be added separately)',
+              '- Do NOT use markdown formatting like bold, italic, backticks, or asterisks',
+              '- Write in plain text only, 2-3 sentences max'
+            ].join('\n');
 
-            PR Details:
-            - Title: "${{ steps.pr-info.outputs.title }}"
-            - Author: ${{ steps.pr-info.outputs.author }}
-            - Branch: ${{ steps.pr-info.outputs.branch }} into ${{ steps.pr-info.outputs.base }}
-            - Size: ${{ steps.pr-info.outputs.size }} (${{ steps.pr-info.outputs.additions }} additions, ${{ steps.pr-info.outputs.deletions }} deletions)
-            - Files changed: ${{ steps.pr-info.outputs.files_changed }}
-            - Files: ${{ steps.pr-info.outputs.file_names }}
-            - Description: ${{ steps.pr-info.outputs.body }}
-
-            Rules:
-            - Keep it concise and friendly
-            - Mention what the PR is about based on the title and files
-            - Suggest how long the review might take based on size
-            - Do NOT use emojis
-            - Do NOT include the PR link (it will be added separately)
-            - Do NOT use markdown formatting
-            - Write in plain text only`;
+            console.log('Prompt built successfully');
 
             const aiMessage = await callGemini(prompt);
 
             if (aiMessage) {
-              console.log('AI generated message:', aiMessage);
-              core.setOutput('message', aiMessage);
+              // Clean AI response of any markdown it might include
+              const cleanMessage = aiMessage
+                .replace(/\*/g, '')
+                .replace(/`/g, '')
+                .replace(/_/g, '')
+                .replace(/~/g, '')
+                .replace(/\n/g, ' ')
+                .trim();
+
+              console.log('AI generated message:', cleanMessage);
+              core.setOutput('message', cleanMessage);
               core.setOutput('has_ai', 'true');
             } else {
               const fallback = 'A new pull request has been opened and is ready for review.';
@@ -205,8 +226,9 @@ jobs:
                 {
                   "type": "section",
                   "text": {
-                    "type": "mrkdwn",
-                    "text": "${{ steps.ai-message.outputs.message }}"
+                    "type": "plain_text",
+                    "text": "${{ steps.ai-message.outputs.message }}",
+                    "emoji": false
                   }
                 },
                 {

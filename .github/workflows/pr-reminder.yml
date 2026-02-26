@@ -193,35 +193,47 @@ jobs:
               // ========================================
               // GENERATE AI MESSAGE
               // ========================================
-              const prompt = `You are a Slack bot reminding a software team to review a pull request that has been ignored. Generate a short reminder message (2-3 sentences).
+              const promptParts = [
+                'You are a Slack bot reminding a software team to review a pull request that has been ignored.',
+                'Generate a short reminder message (2-3 sentences).',
+                '',
+                'Context:',
+                '- PR title: ' + pr.title,
+                '- Author: ' + pr.user.login,
+                '- Pending for: ' + Math.round(minutesElapsed) + ' minutes',
+                '- Severity: ' + severity.toUpperCase(),
+                '- Files changed: ' + (pr.changed_files || 0),
+                '- Lines: +' + (pr.additions || 0) + '/-' + (pr.deletions || 0),
+                '- No one has reviewed, commented, or even looked at this PR',
+                '',
+                'Rules:',
+                '- Severity LOW: gentle, friendly nudge',
+                '- Severity MEDIUM: slightly more urgent, mention the time',
+                '- Severity HIGH: firm but professional, emphasize this is blocking work',
+                '- Severity CRITICAL: urgent tone, this has been waiting way too long',
+                '- Do NOT use emojis',
+                '- Do NOT include PR links',
+                '- Do NOT use markdown formatting like bold, italic, backticks, or asterisks',
+                '- Keep it plain text, 2-3 sentences max',
+                '- Be creative, vary your messages'
+              ];
 
-              Context:
-              - PR title: "${pr.title}"
-              - Author: ${pr.user.login}
-              - Pending for: ${Math.round(minutesElapsed)} minutes
-              - Severity: ${severity.toUpperCase()}
-              - Files changed: ${pr.changed_files || 0}
-              - Lines: +${pr.additions || 0}/-${pr.deletions || 0}
-              - No one has reviewed, commented, or even looked at this PR
-
-              Rules:
-              - Severity LOW: gentle, friendly nudge
-              - Severity MEDIUM: slightly more urgent, mention the time
-              - Severity HIGH: firm but professional, emphasize this is blocking work
-              - Severity CRITICAL: urgent tone, this has been waiting way too long
-              - Do NOT use emojis
-              - Do NOT include PR links
-              - Do NOT use markdown
-              - Keep it plain text, 2-3 sentences max
-              - Be creative, vary your messages, don't be repetitive`;
+              const prompt = promptParts.join('\n');
 
               console.log('  Calling Gemini API...');
               const aiMessage = await callGemini(prompt);
 
               let statusMessage = '';
               if (aiMessage) {
-                console.log(`  AI message: ${aiMessage}`);
-                statusMessage = aiMessage;
+                // Clean any markdown from AI response
+                statusMessage = aiMessage
+                  .replace(/\*/g, '')
+                  .replace(/`/g, '')
+                  .replace(/_/g, '')
+                  .replace(/~/g, '')
+                  .replace(/\n/g, ' ')
+                  .trim();
+                console.log('  AI message: ' + statusMessage);
               } else {
                 console.log('  AI unavailable, using fallback');
                 const hasReviewers = pr.requested_reviewers.length > 0;
@@ -229,7 +241,7 @@ jobs:
                   const reviewerMentions = pr.requested_reviewers.map(
                     r => getSlackMention(r.login)
                   );
-                  statusMessage = `Waiting for review from: ${reviewerMentions.join(', ')} — no activity yet`;
+                  statusMessage = 'Waiting for review from: ' + reviewerMentions.join(', ') + ' — no activity yet';
                 } else {
                   statusMessage = 'No reviewers assigned and no activity. Someone should pick this up.';
                 }
