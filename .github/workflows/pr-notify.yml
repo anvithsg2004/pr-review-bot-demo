@@ -62,7 +62,6 @@ jobs:
 
             const fileNames = files.map(f => f.filename).join(', ');
 
-            // Sanitize description — remove backticks and special chars
             const rawBody = (pr.body || 'No description provided').substring(0, 300);
             const cleanBody = rawBody
               .replace(/`/g, '')
@@ -89,7 +88,7 @@ jobs:
             core.setOutput('file_names', fileNames);
             core.setOutput('body', cleanBody);
 
-            - name: Generate AI Message
+      - name: Generate AI Message
         id: ai-message
         uses: actions/github-script@v7
         env:
@@ -155,7 +154,7 @@ jobs:
                         const text = parsed.candidates[0].content.parts[0].text;
                         resolve(text.trim());
                       } else {
-                        console.log('Unexpected Gemini response structure:', JSON.stringify(parsed).substring(0, 500));
+                        console.log('Unexpected Gemini response:', JSON.stringify(parsed).substring(0, 500));
                         resolve(null);
                       }
                     } catch (e) {
@@ -174,7 +173,6 @@ jobs:
               });
             }
 
-            // Build a clear, detailed prompt
             const prompt = [
               'You are a Slack notification bot for a software development team.',
               'Write exactly 2 to 3 sentences to inform the team that a new pull request has been created and needs their review.',
@@ -202,14 +200,12 @@ jobs:
             ].join('\n');
 
             console.log('Sending prompt to Gemini...');
-            console.log('Prompt length:', prompt.length);
 
             const aiMessage = await callGemini(prompt);
 
             let finalMessage = '';
 
             if (aiMessage) {
-              // Clean the response
               let cleaned = aiMessage
                 .replace(/\*/g, '')
                 .replace(/`/g, '')
@@ -225,39 +221,28 @@ jobs:
               console.log('Cleaned AI response:', cleaned);
               console.log('Cleaned length:', cleaned.length);
 
-              // Check if the message is good enough
               if (cleaned.length >= 50) {
                 finalMessage = cleaned;
-                console.log('Using AI message (length: ' + cleaned.length + ')');
+                console.log('Using AI message');
               } else {
-                console.log('AI message too short (' + cleaned.length + ' chars), using fallback');
-                finalMessage = '';
+                console.log('AI message too short, using fallback');
               }
             } else {
               console.log('AI returned null, using fallback');
             }
 
-            // Fallback message if AI failed or was too short
             if (!finalMessage) {
-              const size = process.env.PR_SIZE;
-              const files = process.env.PR_FILE_NAMES;
-              const title = process.env.PR_TITLE;
-
-              finalMessage = 'A new pull request titled "' + title + '" has been opened and is ready for review. ' +
-                'It is a ' + size.toLowerCase() + ' change touching ' + process.env.PR_FILES_CHANGED + ' file(s). ' +
-                'Please take a look when you have a moment.';
-
-              console.log('Using generated fallback:', finalMessage);
+              finalMessage = 'A new pull request titled ' + process.env.PR_TITLE +
+                ' has been opened and is ready for review. It is a ' +
+                process.env.PR_SIZE.toLowerCase() + ' change touching ' +
+                process.env.PR_FILES_CHANGED + ' file(s). Please take a look when you have a moment.';
+              console.log('Using fallback:', finalMessage);
             }
 
             core.setOutput('message', finalMessage);
 
       - name: Send Slack Notification
         uses: slackapi/slack-github-action@v1.26.0
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
-          AI_MESSAGE: ${{ steps.ai-message.outputs.message }}
         with:
           payload: |
             {
