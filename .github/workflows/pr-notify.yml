@@ -89,7 +89,7 @@ jobs:
             core.setOutput('file_names', fileNames);
             core.setOutput('body', cleanBody);
 
-      - name: Generate AI Message
+            - name: Generate AI Message
         id: ai-message
         uses: actions/github-script@v7
         env:
@@ -110,13 +110,19 @@ jobs:
 
             async function callGemini(prompt) {
               const apiKey = process.env.GEMINI_API_KEY;
+              if (!apiKey) {
+                console.log('No Gemini API key found');
+                return null;
+              }
+
               const url = `/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
               const requestBody = JSON.stringify({
                 contents: [{ parts: [{ text: prompt }] }],
                 generationConfig: {
                   temperature: 0.7,
-                  maxOutputTokens: 200
+                  maxOutputTokens: 300,
+                  topP: 0.9
                 }
               });
 
@@ -125,22 +131,36 @@ jobs:
                   hostname: 'generativelanguage.googleapis.com',
                   path: url,
                   method: 'POST',
-                  headers: { 'Content-Type': 'application/json' }
+                  headers: {
+                    'Content-Type': 'application/json'
+                  }
                 }, (res) => {
                   let data = '';
                   res.on('data', chunk => data += chunk);
                   res.on('end', () => {
                     try {
                       const parsed = JSON.parse(data);
-                      if (parsed.candidates && parsed.candidates[0]) {
+
+                      if (parsed.error) {
+                        console.log('Gemini API error:', parsed.error.message);
+                        resolve(null);
+                        return;
+                      }
+
+                      if (parsed.candidates &&
+                          parsed.candidates[0] &&
+                          parsed.candidates[0].content &&
+                          parsed.candidates[0].content.parts &&
+                          parsed.candidates[0].content.parts[0]) {
                         const text = parsed.candidates[0].content.parts[0].text;
                         resolve(text.trim());
                       } else {
-                        console.log('Gemini response:', data);
+                        console.log('Unexpected Gemini response structure:', JSON.stringify(parsed).substring(0, 500));
                         resolve(null);
                       }
                     } catch (e) {
                       console.log('Parse error:', e.message);
+                      console.log('Raw response:', data.substring(0, 500));
                       resolve(null);
                     }
                   });
@@ -154,56 +174,90 @@ jobs:
               });
             }
 
-            // Build prompt using environment variables (safe from special chars)
+            // Build a clear, detailed prompt
             const prompt = [
-              'You are a helpful Slack bot for a software engineering team.',
-              'Generate a short, professional message (2-3 sentences) to notify the team about a new pull request that needs review.',
+              'You are a Slack notification bot for a software development team.',
+              'Write exactly 2 to 3 sentences to inform the team that a new pull request has been created and needs their review.',
               '',
-              'PR Details:',
-              '- Title: ' + process.env.PR_TITLE,
-              '- Author: ' + process.env.PR_AUTHOR,
-              '- Branch: ' + process.env.PR_BRANCH + ' into ' + process.env.PR_BASE,
-              '- Size: ' + process.env.PR_SIZE + ' (' + process.env.PR_ADDITIONS + ' additions, ' + process.env.PR_DELETIONS + ' deletions)',
-              '- Files changed: ' + process.env.PR_FILES_CHANGED,
-              '- Files: ' + process.env.PR_FILE_NAMES,
-              '- Description: ' + process.env.PR_BODY,
+              'Here are the pull request details:',
+              'Title: ' + process.env.PR_TITLE,
+              'Author: ' + process.env.PR_AUTHOR,
+              'Branch: ' + process.env.PR_BRANCH + ' merging into ' + process.env.PR_BASE,
+              'Size of change: ' + process.env.PR_SIZE + ' with ' + process.env.PR_ADDITIONS + ' lines added and ' + process.env.PR_DELETIONS + ' lines deleted',
+              'Number of files changed: ' + process.env.PR_FILES_CHANGED,
+              'File names: ' + process.env.PR_FILE_NAMES,
+              'Description from the author: ' + (process.env.PR_BODY || 'No description provided'),
               '',
-              'Rules:',
-              '- Keep it concise and friendly',
-              '- Mention what the PR is about based on the title and files',
-              '- Suggest how long the review might take based on size',
-              '- Do NOT use emojis',
-              '- Do NOT include the PR link (it will be added separately)',
-              '- Do NOT use markdown formatting like bold, italic, backticks, or asterisks',
-              '- Write in plain text only, 2-3 sentences max'
+              'Your message must follow these rules strictly:',
+              '1. Write exactly 2 to 3 complete sentences',
+              '2. Briefly describe what the PR changes based on the title and file names',
+              '3. Estimate how long the review might take based on the size',
+              '4. Ask the team to review it',
+              '5. Use a friendly and professional tone',
+              '6. Do NOT use any emojis',
+              '7. Do NOT include any links or URLs',
+              '8. Do NOT use any markdown formatting such as asterisks, underscores, backticks, or hash symbols',
+              '9. Write in plain English text only',
+              '10. Your response should contain ONLY the message text, nothing else'
             ].join('\n');
 
-            console.log('Prompt built successfully');
+            console.log('Sending prompt to Gemini...');
+            console.log('Prompt length:', prompt.length);
 
             const aiMessage = await callGemini(prompt);
 
+            let finalMessage = '';
+
             if (aiMessage) {
-              // Clean AI response of any markdown it might include
-              const cleanMessage = aiMessage
+              // Clean the response
+              let cleaned = aiMessage
                 .replace(/\*/g, '')
                 .replace(/`/g, '')
-                .replace(/_/g, '')
+                .replace(/_/g, ' ')
                 .replace(/~/g, '')
-                .replace(/\n/g, ' ')
+                .replace(/#/g, '')
+                .replace(/\n+/g, ' ')
+                .replace(/\s+/g, ' ')
+                .replace(/"/g, "'")
                 .trim();
 
-              console.log('AI generated message:', cleanMessage);
-              core.setOutput('message', cleanMessage);
-              core.setOutput('has_ai', 'true');
+              console.log('Raw AI response:', aiMessage);
+              console.log('Cleaned AI response:', cleaned);
+              console.log('Cleaned length:', cleaned.length);
+
+              // Check if the message is good enough
+              if (cleaned.length >= 50) {
+                finalMessage = cleaned;
+                console.log('Using AI message (length: ' + cleaned.length + ')');
+              } else {
+                console.log('AI message too short (' + cleaned.length + ' chars), using fallback');
+                finalMessage = '';
+              }
             } else {
-              const fallback = 'A new pull request has been opened and is ready for review.';
-              console.log('Using fallback message');
-              core.setOutput('message', fallback);
-              core.setOutput('has_ai', 'false');
+              console.log('AI returned null, using fallback');
             }
+
+            // Fallback message if AI failed or was too short
+            if (!finalMessage) {
+              const size = process.env.PR_SIZE;
+              const files = process.env.PR_FILE_NAMES;
+              const title = process.env.PR_TITLE;
+
+              finalMessage = 'A new pull request titled "' + title + '" has been opened and is ready for review. ' +
+                'It is a ' + size.toLowerCase() + ' change touching ' + process.env.PR_FILES_CHANGED + ' file(s). ' +
+                'Please take a look when you have a moment.';
+
+              console.log('Using generated fallback:', finalMessage);
+            }
+
+            core.setOutput('message', finalMessage);
 
       - name: Send Slack Notification
         uses: slackapi/slack-github-action@v1.26.0
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+          AI_MESSAGE: ${{ steps.ai-message.outputs.message }}
         with:
           payload: |
             {
@@ -227,7 +281,7 @@ jobs:
                   "type": "section",
                   "text": {
                     "type": "plain_text",
-                    "text": "${{ steps.ai-message.outputs.message }}",
+                    "text": ${{ toJSON(steps.ai-message.outputs.message) }},
                     "emoji": false
                   }
                 },
