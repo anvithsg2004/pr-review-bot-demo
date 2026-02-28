@@ -33,12 +33,17 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const { loadConfig, getSlackMention, getReviewerMentions } = require('./.github/scripts/helpers/config');
-            const { getPRFileDetails, isPRIgnored, formatTimeElapsed, calculateSeverity } = require('./.github/scripts/helpers/pr-utils');
-            const { generateReminderMessage } = require('./.github/scripts/helpers/messages');
+            const { getPRFileDetails, getPRReviewStatus, formatTimeElapsed, calculateSeverity } = require('./.github/scripts/helpers/pr-utils');
+            const { generateReminderMessage, generateStalledMessage } = require('./.github/scripts/helpers/messages');
 
             const config = loadConfig();
             const owner = context.repo.owner;
             const repo = context.repo.repo;
+
+            const minApprovals = (config.review_settings && config.review_settings.min_approvals) || 2;
+            const stalledThreshold = (config.review_settings && config.review_settings.stalled_threshold_minutes) || 120;
+
+            console.log(`Config: min_approvals=${minApprovals}, stalled_threshold=${stalledThreshold} min`);
 
             const { data: pullRequests } = await github.rest.pulls.list({
               owner, repo, state: 'open', sort: 'created', direction: 'asc'
@@ -48,24 +53,31 @@ jobs:
             const pendingPRs = [];
 
             for (const pr of pullRequests) {
-              console.log(`\nChecking PR #${pr.number}: ${pr.title}`);
+              console.log(`\n========================================`);
+              console.log(`Checking PR #${pr.number}: ${pr.title}`);
 
+              // Skip drafts
               if (pr.draft) { console.log('  Skipping: draft'); continue; }
 
+              // Skip opt-out labels
               const skipLabels = ['no-reminder', 'wip', 'on-hold'];
               if (pr.labels.some(l => skipLabels.includes(l.name))) {
                 console.log('  Skipping: opt-out label');
                 continue;
               }
 
-              const status = await isPRIgnored(github, owner, repo, pr);
-              if (!status.ignored) {
-                console.log(`  Skipping: ${status.reason}`);
-                continue;
-              }
-              console.log(`  PR is ${status.reason}`);
+              // ── Analyze review status ──
+              const reviewStatus = await getPRReviewStatus(github, owner, repo, pr, minApprovals);
 
-              const fileInfo = await getPRFileDetails(github, owner, repo, pr.number);
+              console.log(`  Status: ${reviewStatus.status}`);
+              console.log(`  Reason: ${reviewStatus.reason}`);
+              console.log(`  Approvals: ${reviewStatus.approvalCount}/${minApprovals}`);
+              console.log(`  Approved by: ${reviewStatus.approvedBy.join(', ') || 'none'}`);
+              console.log(`  Changes requested by: ${reviewStatus.changesRequestedBy.join(', ') || 'none'}`);
+              console.log(`  Comments: ${reviewStatus.commentCount}, Inline: ${reviewStatus.inlineCommentCount}`);
+              console.log(`  Pending reviewers: ${reviewStatus.pendingReviewers.join(', ') || 'none'}`);
+
+              // ── Decision logic ──
               const createdAt = new Date(pr.created_at);
               const minutesElapsed = (new Date() - createdAt) / (1000 * 60);
               const hoursElapsed = minutesElapsed / 60;
@@ -73,18 +85,72 @@ jobs:
               const createdFormatted = createdAt.toUTCString();
               const severity = calculateSeverity(minutesElapsed, config.escalation_thresholds);
 
-              console.log(`  Elapsed: ${Math.round(minutesElapsed)} min | Severity: ${severity}`);
+              console.log(`  Elapsed: ${Math.round(minutesElapsed)} min (${Math.round(hoursElapsed * 10) / 10}h)`);
+              console.log(`  Severity: ${severity}`);
 
-              const statusMessage = generateReminderMessage({
-                pr, config,
-                files: fileInfo.files,
-                additions: fileInfo.additions,
-                deletions: fileInfo.deletions,
-                size: fileInfo.size,
-                timeString, createdFormatted, severity
-              });
+              let shouldNotify = false;
+              let statusMessage = '';
+
+              if (reviewStatus.status === 'fully_approved') {
+                // ── FULLY APPROVED: Skip ──
+                console.log(`  ✅ SKIP: Fully approved (${reviewStatus.approvalCount}/${minApprovals})`);
+                continue;
+
+              } else if (reviewStatus.status === 'ignored') {
+                // ── IGNORED: Always notify (existing behavior) ──
+                shouldNotify = true;
+                console.log(`  🔔 NOTIFY: PR completely ignored`);
+
+                const fileInfo = await getPRFileDetails(github, owner, repo, pr.number);
+
+                statusMessage = generateReminderMessage({
+                  pr, config,
+                  files: fileInfo.files,
+                  additions: fileInfo.additions,
+                  deletions: fileInfo.deletions,
+                  size: fileInfo.size,
+                  timeString, createdFormatted, severity
+                });
+
+              } else if (reviewStatus.status === 'stalled') {
+                // ── STALLED: Notify only if exceeds stalled threshold ──
+                if (minutesElapsed >= stalledThreshold) {
+                  shouldNotify = true;
+                  console.log(`  🔔 NOTIFY: PR stalled (${Math.round(minutesElapsed)} min > ${stalledThreshold} min threshold)`);
+
+                  const fileInfo = await getPRFileDetails(github, owner, repo, pr.number);
+
+                  statusMessage = generateStalledMessage({
+                    pr, config,
+                    files: fileInfo.files,
+                    additions: fileInfo.additions,
+                    deletions: fileInfo.deletions,
+                    size: fileInfo.size,
+                    timeString, createdFormatted,
+                    reviewStatus, minApprovals
+                  });
+                } else {
+                  console.log(`  ⏳ SKIP: PR has activity but only ${Math.round(minutesElapsed)} min old (threshold: ${stalledThreshold} min)`);
+                  continue;
+                }
+              }
+
+              if (!shouldNotify) continue;
 
               console.log('  Message: ' + statusMessage.substring(0, 120) + '...');
+
+              // ── Gather file info (if not already loaded) ──
+              let fileInfo;
+              try {
+                fileInfo = await getPRFileDetails(github, owner, repo, pr.number);
+              } catch (e) {
+                fileInfo = { files: [], additions: 0, deletions: 0, size: 'Unknown', fileNames: '', fileDescriptions: [] };
+              }
+
+              // Approved by mentions
+              const approvedByMentions = reviewStatus.approvedBy
+                .map(u => getSlackMention(config, u))
+                .join(', ');
 
               pendingPRs.push({
                 number: pr.number,
@@ -106,11 +172,21 @@ jobs:
                 additions: fileInfo.additions,
                 deletions: fileInfo.deletions,
                 changed_files: fileInfo.files.length,
-                file_names: fileInfo.fileNames
+                file_names: fileInfo.fileNames,
+                // New fields
+                review_status: reviewStatus.status,
+                approval_count: reviewStatus.approvalCount,
+                approvals_needed: reviewStatus.approvalsNeeded,
+                min_approvals: minApprovals,
+                approved_by: approvedByMentions
               });
             }
 
-            console.log(`\nTotal ignored PRs: ${pendingPRs.length}`);
+            console.log(`\n========================================`);
+            console.log(`Total PRs needing attention: ${pendingPRs.length}`);
+            console.log(`  Ignored: ${pendingPRs.filter(p => p.review_status === 'ignored').length}`);
+            console.log(`  Stalled: ${pendingPRs.filter(p => p.review_status === 'stalled').length}`);
+
             core.setOutput('pending_prs', JSON.stringify(pendingPRs));
             core.setOutput('should_notify', (pendingPRs.length > 0).toString());
 

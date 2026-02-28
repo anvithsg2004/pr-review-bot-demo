@@ -28,18 +28,11 @@ function buildNotificationPayload(pr, message, authorMention, reviewerMentions, 
     blocks: [
       {
         type: 'header',
-        text: {
-          type: 'plain_text',
-          text: 'Pull Request — Review Requested',
-          emoji: false
-        }
+        text: { type: 'plain_text', text: 'Pull Request — Review Requested', emoji: false }
       },
       {
         type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: `*<${pr.html_url}|#${pr.number}: ${pr.title}>*`
-        }
+        text: { type: 'mrkdwn', text: `*<${pr.html_url}|#${pr.number}: ${pr.title}>*` }
       },
       {
         type: 'section',
@@ -50,30 +43,16 @@ function buildNotificationPayload(pr, message, authorMention, reviewerMentions, 
         fields: [
           { type: 'mrkdwn', text: `*Author:*\n${authorMention}` },
           { type: 'mrkdwn', text: `*Reviewers:*\n${reviewerMentions}` },
-          {
-            type: 'mrkdwn',
-            text: `*Branch:*\n\`${pr.head.ref}\` into \`${pr.base.ref}\``
-          },
+          { type: 'mrkdwn', text: `*Branch:*\n\`${pr.head.ref}\` into \`${pr.base.ref}\`` },
           { type: 'mrkdwn', text: `*Size:*\n${fileInfo.size}` },
-          {
-            type: 'mrkdwn',
-            text: `*Files Changed:*\n${fileInfo.files.length}`
-          },
-          {
-            type: 'mrkdwn',
-            text: `*Lines Changed:*\n+${fileInfo.additions} / -${fileInfo.deletions}`
-          }
+          { type: 'mrkdwn', text: `*Files Changed:*\n${fileInfo.files.length}` },
+          { type: 'mrkdwn', text: `*Lines Changed:*\n+${fileInfo.additions} / -${fileInfo.deletions}` }
         ]
       },
       { type: 'divider' },
       {
         type: 'context',
-        elements: [
-          {
-            type: 'mrkdwn',
-            text: 'Severity: *LOW* | Reminders will follow if review remains pending'
-          }
-        ]
+        elements: [{ type: 'mrkdwn', text: 'Severity: *LOW* | Reminders will follow if review remains pending' }]
       },
       {
         type: 'actions',
@@ -103,6 +82,11 @@ function buildReminderPayload(pendingPRs) {
     critical: ':red_circle:'
   };
 
+  const statusIcons = {
+    ignored: ':no_entry_sign:',
+    stalled: ':hourglass_flowing_sand:'
+  };
+
   const blocks = [
     {
       type: 'header',
@@ -120,13 +104,19 @@ function buildReminderPayload(pendingPRs) {
   ];
 
   for (const pr of pendingPRs) {
-    const icon = severityIcons[pr.severity] || ':white_circle:';
+    const sevIcon = severityIcons[pr.severity] || ':white_circle:';
+    const statIcon = statusIcons[pr.review_status] || ':white_circle:';
+
+    // Status tag
+    const statusTag = pr.review_status === 'stalled'
+      ? `STALLED — ${pr.approval_count}/${pr.min_approvals} approvals`
+      : 'NO ACTIVITY';
 
     blocks.push({
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `${icon} *[${pr.severity_label}]* *<${pr.url}|#${pr.number}: ${pr.title}>*`
+        text: `${sevIcon} *[${pr.severity_label}]* ${statIcon} *${statusTag}*\n*<${pr.url}|#${pr.number}: ${pr.title}>*`
       }
     });
 
@@ -135,28 +125,35 @@ function buildReminderPayload(pendingPRs) {
       text: { type: 'mrkdwn', text: pr.status_message }
     });
 
-    blocks.push({
-      type: 'section',
-      fields: [
-        { type: 'mrkdwn', text: `*Author:*\n${pr.author_mention}` },
-        { type: 'mrkdwn', text: `*Reviewers:*\n${pr.reviewer_mentions}` },
-        { type: 'mrkdwn', text: `*Open Since:*\n${pr.created_at}` },
-        { type: 'mrkdwn', text: `*Waiting For:*\n${pr.time_string}` },
-        {
-          type: 'mrkdwn',
-          text: `*Branch:*\n\`${pr.branch_from}\` into \`${pr.branch_to}\``
-        },
-        {
-          type: 'mrkdwn',
-          text: `*Size:*\n${pr.size} (+${pr.additions}/-${pr.deletions} | ${pr.changed_files} files)`
-        }
-      ]
-    });
+    // Build fields
+    const fields = [
+      { type: 'mrkdwn', text: `*Author:*\n${pr.author_mention}` },
+      { type: 'mrkdwn', text: `*Reviewers:*\n${pr.reviewer_mentions}` },
+      { type: 'mrkdwn', text: `*Open Since:*\n${pr.created_at}` },
+      { type: 'mrkdwn', text: `*Waiting For:*\n${pr.time_string}` },
+      { type: 'mrkdwn', text: `*Branch:*\n\`${pr.branch_from}\` into \`${pr.branch_to}\`` },
+      { type: 'mrkdwn', text: `*Size:*\n${pr.size} (+${pr.additions}/-${pr.deletions} | ${pr.changed_files} files)` }
+    ];
 
-    const truncatedFiles =
-      pr.file_names.length > 200
-        ? pr.file_names.substring(0, 200) + '...'
-        : pr.file_names;
+    // Add approval progress for stalled PRs
+    if (pr.review_status === 'stalled') {
+      fields.push({
+        type: 'mrkdwn',
+        text: `*Approvals:*\n${pr.approval_count}/${pr.min_approvals} (need ${pr.approvals_needed} more)`
+      });
+      if (pr.approved_by && pr.approved_by.length > 0) {
+        fields.push({
+          type: 'mrkdwn',
+          text: `*Approved By:*\n${pr.approved_by}`
+        });
+      }
+    }
+
+    blocks.push({ type: 'section', fields: fields.slice(0, 10) });
+
+    const truncatedFiles = pr.file_names.length > 200
+      ? pr.file_names.substring(0, 200) + '...'
+      : pr.file_names;
 
     blocks.push({
       type: 'context',
@@ -183,26 +180,29 @@ function buildReminderPayload(pendingPRs) {
     blocks.push({ type: 'divider' });
   }
 
+  // Summary footer
   const count = sev => pendingPRs.filter(p => p.severity === sev).length;
+  const ignoredCount = pendingPRs.filter(p => p.review_status === 'ignored').length;
+  const stalledCount = pendingPRs.filter(p => p.review_status === 'stalled').length;
 
   blocks.push({
     type: 'context',
-    elements: [
-      {
-        type: 'mrkdwn',
-        text:
-          `:red_circle: Critical: ${count('critical')} | ` +
-          `:large_orange_circle: High: ${count('high')} | ` +
-          `:large_yellow_circle: Medium: ${count('medium')} | ` +
-          `:white_circle: Low: ${count('low')}`
-      }
-    ]
+    elements: [{
+      type: 'mrkdwn',
+      text:
+        `:red_circle: Critical: ${count('critical')} | ` +
+        `:large_orange_circle: High: ${count('high')} | ` +
+        `:large_yellow_circle: Medium: ${count('medium')} | ` +
+        `:white_circle: Low: ${count('low')} | ` +
+        `:no_entry_sign: Ignored: ${ignoredCount} | ` +
+        `:hourglass_flowing_sand: Stalled: ${stalledCount}`
+    }]
   });
 
   return { blocks };
 }
 
-function buildApprovedPayload(pr, authorMention, approvedBy, reviewTime) {
+function buildApprovedPayload(pr, authorMention, approvedBy, reviewTime, minApprovals) {
   return {
     blocks: [
       {
@@ -220,24 +220,22 @@ function buildApprovedPayload(pr, authorMention, approvedBy, reviewTime) {
       },
       {
         type: 'context',
-        elements: [{ type: 'mrkdwn', text: 'All reminders stopped. This PR is ready to merge.' }]
+        elements: [{ type: 'mrkdwn', text: `All ${minApprovals} required approvals received. This PR is ready to merge.` }]
       },
       {
         type: 'actions',
-        elements: [
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: 'Merge PR', emoji: false },
-            url: pr.html_url,
-            style: 'primary'
-          }
-        ]
+        elements: [{
+          type: 'button',
+          text: { type: 'plain_text', text: 'Merge PR', emoji: false },
+          url: pr.html_url,
+          style: 'primary'
+        }]
       }
     ]
   };
 }
 
-function buildPartialApprovalPayload(pr, reviewerMention, reviewTime, stillWaiting, approvalCount, pendingCount) {
+function buildPartialApprovalPayload(pr, reviewerMention, reviewTime, stillWaiting, approvalCount, pendingCount, minApprovals) {
   return {
     blocks: [
       {
@@ -247,13 +245,13 @@ function buildPartialApprovalPayload(pr, reviewerMention, reviewTime, stillWaiti
           text:
             `*Partial Approval* — *<${pr.html_url}|#${pr.number}: ${pr.title}>*\n\n` +
             `${reviewerMention} approved (review time: ${reviewTime})\n` +
-            `Still waiting on: ${stillWaiting}\n` +
-            `Approvals: ${approvalCount} received, ${pendingCount} remaining`
+            `Approvals: ${approvalCount}/${minApprovals} — need ${pendingCount} more\n` +
+            `Still waiting on: ${stillWaiting}`
         }
       },
       {
         type: 'context',
-        elements: [{ type: 'mrkdwn', text: 'Reminders will continue for remaining reviewers.' }]
+        elements: [{ type: 'mrkdwn', text: `Reminders will continue until ${minApprovals} approvals are received.` }]
       }
     ]
   };
@@ -275,14 +273,12 @@ function buildChangesRequestedPayload(pr, reviewerMention, authorMention, feedba
       },
       {
         type: 'actions',
-        elements: [
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: 'View Feedback', emoji: false },
-            url: pr.html_url,
-            style: 'primary'
-          }
-        ]
+        elements: [{
+          type: 'button',
+          text: { type: 'plain_text', text: 'View Feedback', emoji: false },
+          url: pr.html_url,
+          style: 'primary'
+        }]
       }
     ]
   };
@@ -290,37 +286,33 @@ function buildChangesRequestedPayload(pr, reviewerMention, authorMention, feedba
 
 function buildMergedPayload(pr) {
   return {
-    blocks: [
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text:
-            `*PR Merged*\n\n` +
-            `*<${pr.html_url}|#${pr.number}: ${pr.title}>*\n\n` +
-            `Author: *${pr.user.login}*\n` +
-            `Merged into \`${pr.base.ref}\`\n` +
-            `+${pr.additions}/-${pr.deletions}`
-        }
+    blocks: [{
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text:
+          `*PR Merged*\n\n` +
+          `*<${pr.html_url}|#${pr.number}: ${pr.title}>*\n\n` +
+          `Author: *${pr.user.login}*\n` +
+          `Merged into \`${pr.base.ref}\`\n` +
+          `+${pr.additions}/-${pr.deletions}`
       }
-    ]
+    }]
   };
 }
 
 function buildClosedPayload(pr) {
   return {
-    blocks: [
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text:
-            `*PR Closed Without Merge*\n\n` +
-            `*<${pr.html_url}|#${pr.number}: ${pr.title}>*\n\n` +
-            `All reminders stopped.`
-        }
+    blocks: [{
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text:
+          `*PR Closed Without Merge*\n\n` +
+          `*<${pr.html_url}|#${pr.number}: ${pr.title}>*\n\n` +
+          `All reminders stopped.`
       }
-    ]
+    }]
   };
 }
 

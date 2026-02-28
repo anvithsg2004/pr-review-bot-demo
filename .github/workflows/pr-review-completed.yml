@@ -39,13 +39,16 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
 
-            // Analyze reviews
+            const minApprovals = (config.review_settings && config.review_settings.min_approvals) || 2;
+
+            // ── Analyze reviews ──
             const { data: allReviews } = await github.rest.pulls.listReviews({
               owner, repo, pull_number: pr.number
             });
 
             const latestReviews = {};
             for (const r of allReviews) {
+              if (r.user.login === pr.user.login) continue;
               if (!latestReviews[r.user.login] ||
                   new Date(r.submitted_at) > new Date(latestReviews[r.user.login].submitted_at)) {
                 latestReviews[r.user.login] = r;
@@ -65,9 +68,10 @@ jobs:
               .map(r => r.login);
 
             const isFullyApproved =
-              stillPending.length === 0 &&
-              changesRequested.length === 0 &&
-              approvals.length > 0;
+              approvals.length >= minApprovals &&
+              changesRequested.length === 0;
+
+            const approvalsNeeded = Math.max(0, minApprovals - approvals.length);
 
             const reviewTime = Math.round(
               (new Date(review.submitted_at) - new Date(pr.created_at)) / (1000 * 60)
@@ -76,9 +80,10 @@ jobs:
             const mention = (u) => getSlackMention(config, u);
 
             console.log(`Review: ${review.state} by ${review.user.login}`);
+            console.log(`Approvals: ${approvals.length}/${minApprovals}`);
             console.log(`Fully approved: ${isFullyApproved}`);
 
-            // Send appropriate notification
+            // ── Send appropriate notification ──
             let payload;
 
             if (isFullyApproved) {
@@ -86,23 +91,28 @@ jobs:
                 pr,
                 mention(pr.user.login),
                 approvals.map(a => mention(a)).join(', '),
-                reviewTime
+                reviewTime,
+                minApprovals
               );
 
               await cleanupAllLabels(github, owner, repo, pr.number);
               await github.rest.issues.addLabels({
                 owner, repo, issue_number: pr.number, labels: ['approved']
               });
+              console.log('PR fully approved — labels cleaned, "approved" added');
 
             } else if (review.state === 'approved') {
+              // Partial approval — still needs more
               payload = buildPartialApprovalPayload(
                 pr,
                 mention(review.user.login),
                 reviewTime,
-                stillPending.map(p => mention(p)).join(', ') || 'None',
+                stillPending.map(p => mention(p)).join(', ') || 'Anyone on the team',
                 approvals.length.toString(),
-                stillPending.length.toString()
+                approvalsNeeded.toString(),
+                minApprovals
               );
+              console.log(`Partial approval — ${approvals.length}/${minApprovals}, need ${approvalsNeeded} more`);
 
             } else if (review.state === 'changes_requested') {
               payload = buildChangesRequestedPayload(
