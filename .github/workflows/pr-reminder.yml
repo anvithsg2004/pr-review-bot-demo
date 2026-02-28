@@ -30,7 +30,8 @@ jobs:
         id: pending-prs
         uses: actions/github-script@v7
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OAUTH_LLM_CLIENT_ID: ${{ secrets.OAUTH_LLM_CLIENT_ID }}
+          OAUTH_LLM_CLIENT_SECRET: ${{ secrets.OAUTH_LLM_CLIENT_SECRET }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -42,37 +43,105 @@ jobs:
             );
 
             // ========================================
-            // GEMINI API HELPER
+            // OAUTH TOKEN HELPER — GET FRESH TOKEN
             // ========================================
-            async function callGemini(prompt) {
-              const apiKey = process.env.GEMINI_API_KEY;
-              if (!apiKey) return null;
+            async function getAccessToken() {
+              const tokenUrl = new URL(
+                'https://guidewire-hub.oktapreview.com/oauth2/ausj9ftnbxOqfGU4U0h7/v1/token'
+              );
 
-              const url = `/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-
-              const requestBody = JSON.stringify({
-                contents: [{ parts: [{ text: prompt }] }],
-                generationConfig: {
-                  temperature: 0.8,
-                  maxOutputTokens: 150
-                }
+              const params = new URLSearchParams({
+                grant_type: 'client_credentials',
+                client_id: process.env.OAUTH_LLM_CLIENT_ID,
+                client_secret: process.env.OAUTH_LLM_CLIENT_SECRET,
+                scope: 'any.tenant any.project scp.analytics.genai.user'
               });
 
               return new Promise((resolve) => {
                 const req = https.request({
-                  hostname: 'generativelanguage.googleapis.com',
-                  path: url,
+                  hostname: tokenUrl.hostname,
+                  path: tokenUrl.pathname,
                   method: 'POST',
-                  headers: { 'Content-Type': 'application/json' }
+                  headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Accept': 'application/json'
+                  }
                 }, (res) => {
                   let data = '';
                   res.on('data', chunk => data += chunk);
                   res.on('end', () => {
                     try {
                       const parsed = JSON.parse(data);
-                      if (parsed.candidates && parsed.candidates[0]) {
-                        resolve(parsed.candidates[0].content.parts[0].text.trim());
+                      if (parsed.access_token) {
+                        console.log('Token obtained, expires in:', parsed.expires_in, 'seconds');
+                        resolve(parsed.access_token);
                       } else {
+                        console.log('Token error:', JSON.stringify(parsed));
+                        resolve(null);
+                      }
+                    } catch (e) {
+                      console.log('Token parse error:', e.message);
+                      resolve(null);
+                    }
+                  });
+                });
+                req.on('error', (e) => {
+                  console.log('Token request error:', e.message);
+                  resolve(null);
+                });
+                req.write(params.toString());
+                req.end();
+              });
+            }
+
+            // ========================================
+            // AI CONNECT API HELPER
+            // ========================================
+            let cachedToken = null;
+
+            async function callAI(prompt) {
+              if (!cachedToken) {
+                cachedToken = await getAccessToken();
+              }
+              if (!cachedToken) return null;
+
+              const requestBody = JSON.stringify({
+                model: "gpt-4o",
+                messages: [
+                  {
+                    role: "user",
+                    content: prompt
+                  }
+                ],
+                temperature: 0.8,
+                max_tokens: 150
+              });
+
+              return new Promise((resolve) => {
+                const req = https.request({
+                  hostname: 'aiconnect.int.ccs.guidewire.net',
+                  path: '/genai/v1/chat/completions',
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'Authorization': `Bearer ${cachedToken}`,
+                    'x-tenant': 'guidewire',
+                    'x-star': 'guidewire'
+                  }
+                }, (res) => {
+                  let data = '';
+                  res.on('data', chunk => data += chunk);
+                  res.on('end', () => {
+                    try {
+                      const parsed = JSON.parse(data);
+                      if (parsed.choices &&
+                          parsed.choices[0] &&
+                          parsed.choices[0].message &&
+                          parsed.choices[0].message.content) {
+                        resolve(parsed.choices[0].message.content.trim());
+                      } else {
+                        console.log('AI response issue:', JSON.stringify(parsed).substring(0, 300));
                         resolve(null);
                       }
                     } catch (e) {
@@ -220,12 +289,11 @@ jobs:
 
               const prompt = promptParts.join('\n');
 
-              console.log('  Calling Gemini API...');
-              const aiMessage = await callGemini(prompt);
+              console.log('  Calling AI Connect (gpt-4o)...');
+              const aiMessage = await callAI(prompt);
 
               let statusMessage = '';
               if (aiMessage) {
-                // Clean any markdown from AI response
                 statusMessage = aiMessage
                   .replace(/\*/g, '')
                   .replace(/`/g, '')
@@ -322,7 +390,6 @@ jobs:
                 }
               });
 
-              // AI generated message as a separate block
               blocks.push({
                 type: "context",
                 elements: [{
