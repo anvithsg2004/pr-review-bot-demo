@@ -235,13 +235,18 @@ jobs:
                 ]
               };
 
+              // Get the real name from config, fallback to GitHub username
+              const configName = config.team_members[pr.user.login] ? config.team_members[pr.user.login].name : pr.user.login;
+              // Create the Slack markdown hyperlink: <url|Name>
+              const authorLink = `<https://github.com/${pr.user.login}|${configName}>`;
+
               // Opening sentence variations
               const openings = [
-                `${pr.user.login} submitted a ${size.toLowerCase()} change to ${filesDesc} that adds ${additions} lines and removes ${deletions} lines.`,
-                `A pull request updating ${filesDesc} with ${additions} additions and ${deletions} deletions was opened by ${pr.user.login}.`,
-                `This ${size.toLowerCase()} PR by ${pr.user.login} introduces changes to ${filesDesc}, adding ${additions} lines across ${files.length} file(s).`,
-                `${pr.user.login} has a ${size.toLowerCase()} PR open that modifies ${filesDesc} with ${additions} new lines of code.`,
-                `Changes to ${filesDesc} totaling ${additions} additions and ${deletions} deletions are waiting for review from ${pr.user.login}.`
+                `${authorLink} submitted a ${size.toLowerCase()} change to ${filesDesc} that adds ${additions} lines and removes ${deletions} lines.`,
+                `A pull request updating ${filesDesc} with ${additions} additions and ${deletions} deletions was opened by ${authorLink}.`,
+                `This ${size.toLowerCase()} PR by ${authorLink} introduces changes to ${filesDesc}, adding ${additions} lines across ${files.length} file(s).`,
+                `${authorLink} has a ${size.toLowerCase()} PR open that modifies ${filesDesc} with ${additions} new lines of code.`,
+                `Changes to ${filesDesc} totaling ${additions} additions and ${deletions} deletions are waiting for review from ${authorLink}.`
               ];
 
               // Time sentence variations
@@ -345,9 +350,8 @@ jobs:
               blocks.push({
                 type: "section",
                 text: {
-                  type: "plain_text",
-                  text: pr.status_message,
-                  emoji: false
+                  type: "mrkdwn",
+                  text: pr.status_message
                 }
               });
 
