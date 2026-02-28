@@ -29,131 +29,14 @@ jobs:
       - name: Find Pending PRs and Calculate Severity
         id: pending-prs
         uses: actions/github-script@v7
-        env:
-          OAUTH_LLM_CLIENT_ID: ${{ secrets.OAUTH_LLM_CLIENT_ID }}
-          OAUTH_LLM_CLIENT_SECRET: ${{ secrets.OAUTH_LLM_CLIENT_SECRET }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
-            const https = require('https');
 
             const config = JSON.parse(
               fs.readFileSync('.github/config/team-config.json', 'utf8')
             );
-
-            // ========================================
-            // OAUTH TOKEN HELPER — GET FRESH TOKEN
-            // ========================================
-            async function getAccessToken() {
-              const tokenUrl = new URL(
-                'https://guidewire-hub.oktapreview.com/oauth2/ausj9ftnbxOqfGU4U0h7/v1/token'
-              );
-
-              const params = new URLSearchParams({
-                grant_type: 'client_credentials',
-                client_id: process.env.OAUTH_LLM_CLIENT_ID,
-                client_secret: process.env.OAUTH_LLM_CLIENT_SECRET,
-                scope: 'any.tenant any.project scp.analytics.genai.user'
-              });
-
-              return new Promise((resolve) => {
-                const req = https.request({
-                  hostname: tokenUrl.hostname,
-                  path: tokenUrl.pathname,
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Accept': 'application/json'
-                  }
-                }, (res) => {
-                  let data = '';
-                  res.on('data', chunk => data += chunk);
-                  res.on('end', () => {
-                    try {
-                      const parsed = JSON.parse(data);
-                      if (parsed.access_token) {
-                        console.log('Token obtained, expires in:', parsed.expires_in, 'seconds');
-                        resolve(parsed.access_token);
-                      } else {
-                        console.log('Token error:', JSON.stringify(parsed));
-                        resolve(null);
-                      }
-                    } catch (e) {
-                      console.log('Token parse error:', e.message);
-                      resolve(null);
-                    }
-                  });
-                });
-                req.on('error', (e) => {
-                  console.log('Token request error:', e.message);
-                  resolve(null);
-                });
-                req.write(params.toString());
-                req.end();
-              });
-            }
-
-            // ========================================
-            // AI CONNECT API HELPER
-            // ========================================
-            let cachedToken = null;
-
-            async function callAI(prompt) {
-              if (!cachedToken) {
-                cachedToken = await getAccessToken();
-              }
-              if (!cachedToken) return null;
-
-              const requestBody = JSON.stringify({
-                model: "gpt-4o",
-                messages: [
-                  {
-                    role: "user",
-                    content: prompt
-                  }
-                ],
-                temperature: 0.8,
-                max_tokens: 300
-              });
-
-              return new Promise((resolve) => {
-                const req = https.request({
-                  hostname: 'aiconnect.int.ccs.guidewire.net',
-                  path: '/genai/v1/chat/completions',
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json',
-                    'Authorization': `Bearer ${cachedToken}`,
-                    'x-tenant': 'guidewire',
-                    'x-star': 'guidewire'
-                  }
-                }, (res) => {
-                  let data = '';
-                  res.on('data', chunk => data += chunk);
-                  res.on('end', () => {
-                    try {
-                      const parsed = JSON.parse(data);
-                      if (parsed.choices &&
-                          parsed.choices[0] &&
-                          parsed.choices[0].message &&
-                          parsed.choices[0].message.content) {
-                        resolve(parsed.choices[0].message.content.trim());
-                      } else {
-                        console.log('AI response issue:', JSON.stringify(parsed).substring(0, 300));
-                        resolve(null);
-                      }
-                    } catch (e) {
-                      resolve(null);
-                    }
-                  });
-                });
-                req.on('error', () => resolve(null));
-                req.write(requestBody);
-                req.end();
-              });
-            }
 
             // ========================================
             // FETCH OPEN PRs
@@ -234,7 +117,7 @@ jobs:
               console.log(`  PR is completely ignored`);
 
               // ========================================
-              // GATHER DETAILED PR INFO (NEW)
+              // GATHER DETAILED PR INFO
               // ========================================
               const { data: files } = await github.rest.pulls.listFiles({
                 owner: context.repo.owner,
@@ -251,15 +134,6 @@ jobs:
               else if (totalChanges > 200) size = 'Medium';
 
               const fileNames = files.map(f => f.filename).join(', ');
-
-              const cleanBody = (pr.body || 'No description provided')
-                .substring(0, 300)
-                .replace(/`/g, '')
-                .replace(/\n/g, ' ')
-                .replace(/\r/g, '')
-                .replace(/#/g, '')
-                .replace(/\*/g, '')
-                .trim();
 
               const createdAt = new Date(pr.created_at);
               const now = new Date();
@@ -280,7 +154,6 @@ jobs:
                 timeString = days + ' day' + (days > 1 ? 's' : '') + (remainingHours > 0 ? ' and ' + remainingHours + ' hour' + (remainingHours > 1 ? 's' : '') : '');
               }
 
-              // Created at formatted
               const createdFormatted = createdAt.toUTCString();
 
               console.log(`  Minutes elapsed: ${Math.round(minutesElapsed)}`);
@@ -312,85 +185,84 @@ jobs:
               }).join(', ') || 'No reviewers assigned';
 
               // ========================================
-              // GENERATE AI MESSAGE (ENHANCED PROMPT)
+              // SMART MESSAGE GENERATOR (NO AI NEEDED)
               // ========================================
-              const promptParts = [
-                'You are a Slack bot reminding a software team to review a pull request that has been completely ignored.',
-                'Generate a reminder message with exactly 3 to 4 sentences.',
-                '',
-                'Pull Request Details:',
-                '- PR title: ' + pr.title,
-                '- Author: ' + pr.user.login,
-                '- Branch: ' + pr.head.ref + ' merging into ' + pr.base.ref,
-                '- Description: ' + cleanBody,
-                '- Files changed: ' + files.length,
-                '- File names: ' + fileNames,
-                '- Size: ' + size + ' (' + additions + ' lines added, ' + deletions + ' lines deleted)',
-                '- PR was created on: ' + createdFormatted,
-                '- This PR has been open for: ' + timeString,
-                '- Severity: ' + severity.toUpperCase(),
-                '- No one has reviewed, commented, or even looked at this PR',
-                '- Requested reviewers: ' + (pr.requested_reviewers.map(r => r.login).join(', ') || 'none assigned'),
-                '',
-                'Rules:',
-                '- Sentence 1: Briefly describe WHAT this PR does based on the title, description, and file names',
-                '- Sentence 2: Mention exactly how long this PR has been open (use the time provided) and when it was created',
-                '- Sentence 3: Based on severity, urge the team to review',
-                '- Sentence 4 (optional): If severity is HIGH or CRITICAL, mention this is blocking the author',
-                '',
-                'Tone based on severity:',
-                '- LOW: gentle, friendly reminder',
-                '- MEDIUM: slightly more urgent, express concern about the delay',
-                '- HIGH: firm and professional, emphasize this is blocking work and needs immediate attention',
-                '- CRITICAL: urgent and serious, this has been waiting far too long and must be addressed now',
-                '',
-                'Formatting rules:',
-                '- Do NOT use emojis',
-                '- Do NOT include PR links or URLs',
-                '- Do NOT use any markdown formatting (no bold, italic, backticks, asterisks, underscores)',
-                '- Plain English text only',
-                '- Be creative, do not repeat the same phrasing every time',
-                '- Output ONLY the message text, nothing else'
+
+              // Different openers based on what the PR does
+              const fileDescriptions = [];
+              for (const f of files) {
+                const name = f.filename;
+                if (name.endsWith('.js')) fileDescriptions.push('JavaScript module ' + name);
+                else if (name.endsWith('.ts')) fileDescriptions.push('TypeScript file ' + name);
+                else if (name.endsWith('.yml') || name.endsWith('.yaml')) fileDescriptions.push('workflow configuration ' + name);
+                else if (name.endsWith('.json')) fileDescriptions.push('configuration file ' + name);
+                else if (name.endsWith('.md')) fileDescriptions.push('documentation ' + name);
+                else if (name.endsWith('.css') || name.endsWith('.scss')) fileDescriptions.push('stylesheet ' + name);
+                else if (name.endsWith('.html')) fileDescriptions.push('template ' + name);
+                else fileDescriptions.push('file ' + name);
+              }
+              const filesDesc = fileDescriptions.join(' and ');
+
+              // Severity-specific urgency phrases
+              const urgencyPhrases = {
+                low: [
+                  'A quick review would be much appreciated whenever someone has a moment.',
+                  'If you have a few spare minutes, this could use a pair of fresh eyes.',
+                  'It would be great if someone could take a look when they get a chance.',
+                  'This should be a quick one to review if anyone can pick it up.',
+                  'Whenever you find some time, this PR could use your attention.'
+                ],
+                medium: [
+                  'The review delay is starting to add up, so it would be helpful to get this looked at soon.',
+                  'This has been waiting longer than usual. Could someone please prioritize a review?',
+                  'We are past the typical review window now. It would be great to get some feedback moving.',
+                  'The clock is ticking on this one. A timely review would really help keep things on track.',
+                  'This PR has been in the queue for a while now. Please consider reviewing it today.'
+                ],
+                high: [
+                  'This is blocking progress and needs immediate reviewer attention. Please prioritize this.',
+                  'The lack of review is now holding up work. This needs to be addressed as soon as possible.',
+                  'This PR has been waiting far too long without any feedback. It is becoming a bottleneck.',
+                  'We need someone to step up and review this urgently. The author cannot move forward without it.',
+                  'This delay is impacting the team workflow. Please review this at your earliest opportunity today.'
+                ],
+                critical: [
+                  'This has been ignored for an unacceptable amount of time and must be reviewed immediately.',
+                  'We are well past the critical threshold. This PR requires urgent attention right now.',
+                  'This has been completely unattended and is severely blocking progress. Immediate action is needed.',
+                  'This PR has reached critical status. All other work should be deprioritized until this is reviewed.',
+                  'The review for this PR is critically overdue. Someone must pick this up without further delay.'
+                ]
+              };
+
+              // Opening sentence variations
+              const openings = [
+                `${pr.user.login} submitted a ${size.toLowerCase()} change to ${filesDesc} that adds ${additions} lines and removes ${deletions} lines.`,
+                `A pull request updating ${filesDesc} with ${additions} additions and ${deletions} deletions was opened by ${pr.user.login}.`,
+                `This ${size.toLowerCase()} PR by ${pr.user.login} introduces changes to ${filesDesc}, adding ${additions} lines across ${files.length} file(s).`,
+                `${pr.user.login} has a ${size.toLowerCase()} PR open that modifies ${filesDesc} with ${additions} new lines of code.`,
+                `Changes to ${filesDesc} totaling ${additions} additions and ${deletions} deletions are waiting for review from ${pr.user.login}.`
               ];
 
-              const prompt = promptParts.join('\n');
+              // Time sentence variations
+              const timeSentences = [
+                `It has been open for ${timeString} since ${createdFormatted}, and no one has reviewed, commented, or acknowledged it.`,
+                `This PR was created on ${createdFormatted} and has been sitting unreviewed for ${timeString} with zero activity.`,
+                `Since being opened ${timeString} ago on ${createdFormatted}, this PR has received absolutely no attention.`,
+                `For the past ${timeString}, since ${createdFormatted}, this change has had no reviews, no comments, and no engagement.`,
+                `It has now been ${timeString} since this was submitted on ${createdFormatted}, and not a single person has looked at it.`
+              ];
 
-              console.log('  Calling AI Connect (gpt-4o)...');
-              const aiMessage = await callAI(prompt);
+              // Pick random variants
+              const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
-              let statusMessage = '';
-              if (aiMessage) {
-                statusMessage = aiMessage
-                  .replace(/\*/g, '')
-                  .replace(/`/g, '')
-                  .replace(/_/g, ' ')
-                  .replace(/~/g, '')
-                  .replace(/#/g, '')
-                  .replace(/\n+/g, ' ')
-                  .replace(/\s+/g, ' ')
-                  .trim();
-                console.log('  AI message: ' + statusMessage);
+              const statusMessage = [
+                pick(openings),
+                pick(timeSentences),
+                pick(urgencyPhrases[severity])
+              ].join(' ');
 
-                if (statusMessage.length < 50) {
-                  console.log('  Too short, using fallback');
-                  statusMessage = '';
-                }
-              } else {
-                console.log('  AI returned null');
-              }
-
-              // Fallback message with full details
-              if (!statusMessage) {
-                statusMessage = 'This PR by ' + pr.user.login +
-                  ' introduces changes to ' + fileNames +
-                  '. It has been open for ' + timeString +
-                  ' since ' + createdFormatted +
-                  ' with zero reviews or comments. ' +
-                  (severity === 'critical' || severity === 'high'
-                    ? 'This needs immediate attention as it is blocking progress.'
-                    : 'Please take a moment to review when you get a chance.');
-                console.log('  Fallback: ' + statusMessage);
-              }
+              console.log('  Message: ' + statusMessage);
 
               pendingPRs.push({
                 number: pr.number,
@@ -454,7 +326,6 @@ jobs:
 
             for (const pr of pendingPRs) {
 
-              // Severity indicator
               const severityBar = {
                 low: ':white_circle:',
                 medium: ':large_yellow_circle:',
@@ -463,7 +334,6 @@ jobs:
               };
               const indicator = severityBar[pr.severity] || ':white_circle:';
 
-              // PR title and link
               blocks.push({
                 type: "section",
                 text: {
@@ -472,7 +342,6 @@ jobs:
                 }
               });
 
-              // AI-generated description (the rich message)
               blocks.push({
                 type: "section",
                 text: {
@@ -482,7 +351,6 @@ jobs:
                 }
               });
 
-              // Detailed info fields
               blocks.push({
                 type: "section",
                 fields: [
@@ -495,7 +363,6 @@ jobs:
                 ]
               });
 
-              // Files changed
               const truncatedFiles = pr.file_names.length > 200
                 ? pr.file_names.substring(0, 200) + '...'
                 : pr.file_names;
@@ -508,7 +375,6 @@ jobs:
                 }]
               });
 
-              // Review button
               blocks.push({
                 type: "actions",
                 elements: [
@@ -537,7 +403,6 @@ jobs:
               blocks.push({ type: "divider" });
             }
 
-            // Summary footer
             const summary = {
               critical: pendingPRs.filter(p => p.severity === 'critical').length,
               high: pendingPRs.filter(p => p.severity === 'high').length,
