@@ -114,7 +114,7 @@ jobs:
                   }
                 ],
                 temperature: 0.8,
-                max_tokens: 150
+                max_tokens: 300
               });
 
               return new Promise((resolve) => {
@@ -233,12 +233,60 @@ jobs:
 
               console.log(`  PR is completely ignored`);
 
+              // ========================================
+              // GATHER DETAILED PR INFO (NEW)
+              // ========================================
+              const { data: files } = await github.rest.pulls.listFiles({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number
+              });
+
+              const additions = files.reduce((sum, f) => sum + f.additions, 0);
+              const deletions = files.reduce((sum, f) => sum + f.deletions, 0);
+              const totalChanges = additions + deletions;
+
+              let size = 'Small';
+              if (totalChanges > 500) size = 'Large';
+              else if (totalChanges > 200) size = 'Medium';
+
+              const fileNames = files.map(f => f.filename).join(', ');
+
+              const cleanBody = (pr.body || 'No description provided')
+                .substring(0, 300)
+                .replace(/`/g, '')
+                .replace(/\n/g, ' ')
+                .replace(/\r/g, '')
+                .replace(/#/g, '')
+                .replace(/\*/g, '')
+                .trim();
+
               const createdAt = new Date(pr.created_at);
               const now = new Date();
               const minutesElapsed = (now - createdAt) / (1000 * 60);
               const hoursElapsed = minutesElapsed / 60;
 
+              // Human-readable time
+              let timeString = '';
+              if (minutesElapsed < 60) {
+                timeString = Math.round(minutesElapsed) + ' minutes';
+              } else if (hoursElapsed < 24) {
+                const h = Math.floor(hoursElapsed);
+                const m = Math.round(minutesElapsed % 60);
+                timeString = h + ' hour' + (h > 1 ? 's' : '') + (m > 0 ? ' and ' + m + ' minutes' : '');
+              } else {
+                const days = Math.floor(hoursElapsed / 24);
+                const remainingHours = Math.round(hoursElapsed % 24);
+                timeString = days + ' day' + (days > 1 ? 's' : '') + (remainingHours > 0 ? ' and ' + remainingHours + ' hour' + (remainingHours > 1 ? 's' : '') : '');
+              }
+
+              // Created at formatted
+              const createdFormatted = createdAt.toUTCString();
+
               console.log(`  Minutes elapsed: ${Math.round(minutesElapsed)}`);
+              console.log(`  Time string: ${timeString}`);
+              console.log(`  Size: ${size}`);
+              console.log(`  Files: ${fileNames}`);
 
               let severity = 'low';
               const thresholds = config.escalation_thresholds;
@@ -259,32 +307,50 @@ jobs:
 
               const authorMention = getSlackMention(pr.user.login);
 
+              const reviewerMentions = pr.requested_reviewers.map(r => {
+                return getSlackMention(r.login);
+              }).join(', ') || 'No reviewers assigned';
+
               // ========================================
-              // GENERATE AI MESSAGE
+              // GENERATE AI MESSAGE (ENHANCED PROMPT)
               // ========================================
               const promptParts = [
-                'You are a Slack bot reminding a software team to review a pull request that has been ignored.',
-                'Generate a short reminder message (2-3 sentences).',
+                'You are a Slack bot reminding a software team to review a pull request that has been completely ignored.',
+                'Generate a reminder message with exactly 3 to 4 sentences.',
                 '',
-                'Context:',
+                'Pull Request Details:',
                 '- PR title: ' + pr.title,
                 '- Author: ' + pr.user.login,
-                '- Pending for: ' + Math.round(minutesElapsed) + ' minutes',
+                '- Branch: ' + pr.head.ref + ' merging into ' + pr.base.ref,
+                '- Description: ' + cleanBody,
+                '- Files changed: ' + files.length,
+                '- File names: ' + fileNames,
+                '- Size: ' + size + ' (' + additions + ' lines added, ' + deletions + ' lines deleted)',
+                '- PR was created on: ' + createdFormatted,
+                '- This PR has been open for: ' + timeString,
                 '- Severity: ' + severity.toUpperCase(),
-                '- Files changed: ' + (pr.changed_files || 0),
-                '- Lines: +' + (pr.additions || 0) + '/-' + (pr.deletions || 0),
                 '- No one has reviewed, commented, or even looked at this PR',
+                '- Requested reviewers: ' + (pr.requested_reviewers.map(r => r.login).join(', ') || 'none assigned'),
                 '',
                 'Rules:',
-                '- Severity LOW: gentle, friendly nudge',
-                '- Severity MEDIUM: slightly more urgent, mention the time',
-                '- Severity HIGH: firm but professional, emphasize this is blocking work',
-                '- Severity CRITICAL: urgent tone, this has been waiting way too long',
+                '- Sentence 1: Briefly describe WHAT this PR does based on the title, description, and file names',
+                '- Sentence 2: Mention exactly how long this PR has been open (use the time provided) and when it was created',
+                '- Sentence 3: Based on severity, urge the team to review',
+                '- Sentence 4 (optional): If severity is HIGH or CRITICAL, mention this is blocking the author',
+                '',
+                'Tone based on severity:',
+                '- LOW: gentle, friendly reminder',
+                '- MEDIUM: slightly more urgent, express concern about the delay',
+                '- HIGH: firm and professional, emphasize this is blocking work and needs immediate attention',
+                '- CRITICAL: urgent and serious, this has been waiting far too long and must be addressed now',
+                '',
+                'Formatting rules:',
                 '- Do NOT use emojis',
-                '- Do NOT include PR links',
-                '- Do NOT use markdown formatting like bold, italic, backticks, or asterisks',
-                '- Keep it plain text, 2-3 sentences max',
-                '- Be creative, vary your messages'
+                '- Do NOT include PR links or URLs',
+                '- Do NOT use any markdown formatting (no bold, italic, backticks, asterisks, underscores)',
+                '- Plain English text only',
+                '- Be creative, do not repeat the same phrasing every time',
+                '- Output ONLY the message text, nothing else'
               ];
 
               const prompt = promptParts.join('\n');
@@ -297,22 +363,33 @@ jobs:
                 statusMessage = aiMessage
                   .replace(/\*/g, '')
                   .replace(/`/g, '')
-                  .replace(/_/g, '')
+                  .replace(/_/g, ' ')
                   .replace(/~/g, '')
-                  .replace(/\n/g, ' ')
+                  .replace(/#/g, '')
+                  .replace(/\n+/g, ' ')
+                  .replace(/\s+/g, ' ')
                   .trim();
                 console.log('  AI message: ' + statusMessage);
-              } else {
-                console.log('  AI unavailable, using fallback');
-                const hasReviewers = pr.requested_reviewers.length > 0;
-                if (hasReviewers) {
-                  const reviewerMentions = pr.requested_reviewers.map(
-                    r => getSlackMention(r.login)
-                  );
-                  statusMessage = 'Waiting for review from: ' + reviewerMentions.join(', ') + ' — no activity yet';
-                } else {
-                  statusMessage = 'No reviewers assigned and no activity. Someone should pick this up.';
+
+                if (statusMessage.length < 50) {
+                  console.log('  Too short, using fallback');
+                  statusMessage = '';
                 }
+              } else {
+                console.log('  AI returned null');
+              }
+
+              // Fallback message with full details
+              if (!statusMessage) {
+                statusMessage = 'This PR by ' + pr.user.login +
+                  ' introduces changes to ' + fileNames +
+                  '. It has been open for ' + timeString +
+                  ' since ' + createdFormatted +
+                  ' with zero reviews or comments. ' +
+                  (severity === 'critical' || severity === 'high'
+                    ? 'This needs immediate attention as it is blocking progress.'
+                    : 'Please take a moment to review when you get a chance.');
+                console.log('  Fallback: ' + statusMessage);
               }
 
               pendingPRs.push({
@@ -321,14 +398,21 @@ jobs:
                 url: pr.html_url,
                 author: pr.user.login,
                 author_mention: authorMention,
+                reviewer_mentions: reviewerMentions,
+                branch_from: pr.head.ref,
+                branch_to: pr.base.ref,
                 minutes_elapsed: Math.round(minutesElapsed),
                 hours_elapsed: Math.round(hoursElapsed * 10) / 10,
+                time_string: timeString,
+                created_at: createdFormatted,
                 severity: severity,
                 severity_label: severity.toUpperCase(),
+                size: size,
                 status_message: statusMessage,
-                additions: pr.additions || 0,
-                deletions: pr.deletions || 0,
-                changed_files: pr.changed_files || 0
+                additions: additions,
+                deletions: deletions,
+                changed_files: files.length,
+                file_names: fileNames
               });
             }
 
@@ -354,7 +438,7 @@ jobs:
                 type: "header",
                 text: {
                   type: "plain_text",
-                  text: `PR Review Reminder — ${pendingPRs.length} PR(s) with No Activity`,
+                  text: `PR Review Reminder — ${pendingPRs.length} PR(s) Awaiting Review`,
                   emoji: false
                 }
               },
@@ -369,38 +453,91 @@ jobs:
             ];
 
             for (const pr of pendingPRs) {
+
+              // Severity indicator
+              const severityBar = {
+                low: ':white_circle:',
+                medium: ':large_yellow_circle:',
+                high: ':large_orange_circle:',
+                critical: ':red_circle:'
+              };
+              const indicator = severityBar[pr.severity] || ':white_circle:';
+
+              // PR title and link
               blocks.push({
                 type: "section",
                 text: {
                   type: "mrkdwn",
-                  text: `[${pr.severity_label}] *<${pr.url}|#${pr.number}: ${pr.title}>*\n` +
-                        `Author: ${pr.author_mention}\n` +
-                        `Pending: *${pr.minutes_elapsed} min* (${pr.hours_elapsed}h) | ` +
-                        `+${pr.additions}/-${pr.deletions} | ${pr.changed_files} files`
-                },
-                accessory: {
-                  type: "button",
-                  text: {
-                    type: "plain_text",
-                    text: "Review Now",
-                    emoji: false
-                  },
-                  url: `${pr.url}/files`,
-                  style: ['high', 'critical'].includes(pr.severity) ? "danger" : "primary"
+                  text: `${indicator} *[${pr.severity_label}]* *<${pr.url}|#${pr.number}: ${pr.title}>*`
                 }
               });
+
+              // AI-generated description (the rich message)
+              blocks.push({
+                type: "section",
+                text: {
+                  type: "plain_text",
+                  text: pr.status_message,
+                  emoji: false
+                }
+              });
+
+              // Detailed info fields
+              blocks.push({
+                type: "section",
+                fields: [
+                  { type: "mrkdwn", text: `*Author:*\n${pr.author_mention}` },
+                  { type: "mrkdwn", text: `*Reviewers:*\n${pr.reviewer_mentions}` },
+                  { type: "mrkdwn", text: `*Open Since:*\n${pr.created_at}` },
+                  { type: "mrkdwn", text: `*Waiting For:*\n${pr.time_string}` },
+                  { type: "mrkdwn", text: `*Branch:*\n\`${pr.branch_from}\` into \`${pr.branch_to}\`` },
+                  { type: "mrkdwn", text: `*Size:*\n${pr.size} (+${pr.additions}/-${pr.deletions} | ${pr.changed_files} files)` }
+                ]
+              });
+
+              // Files changed
+              const truncatedFiles = pr.file_names.length > 200
+                ? pr.file_names.substring(0, 200) + '...'
+                : pr.file_names;
 
               blocks.push({
                 type: "context",
                 elements: [{
                   type: "mrkdwn",
-                  text: `_${pr.status_message}_`
+                  text: `Files: \`${truncatedFiles}\``
                 }]
+              });
+
+              // Review button
+              blocks.push({
+                type: "actions",
+                elements: [
+                  {
+                    type: "button",
+                    text: {
+                      type: "plain_text",
+                      text: "Review Now",
+                      emoji: false
+                    },
+                    url: `${pr.url}/files`,
+                    style: ['high', 'critical'].includes(pr.severity) ? "danger" : "primary"
+                  },
+                  {
+                    type: "button",
+                    text: {
+                      type: "plain_text",
+                      text: "View PR",
+                      emoji: false
+                    },
+                    url: pr.url
+                  }
+                ]
               });
 
               blocks.push({ type: "divider" });
             }
 
+            // Summary footer
             const summary = {
               critical: pendingPRs.filter(p => p.severity === 'critical').length,
               high: pendingPRs.filter(p => p.severity === 'high').length,
@@ -412,7 +549,7 @@ jobs:
               type: "context",
               elements: [{
                 type: "mrkdwn",
-                text: `Summary — Critical: ${summary.critical} | High: ${summary.high} | Medium: ${summary.medium} | Low: ${summary.low}`
+                text: `:red_circle: Critical: ${summary.critical} | :large_orange_circle: High: ${summary.high} | :large_yellow_circle: Medium: ${summary.medium} | :white_circle: Low: ${summary.low}`
               }]
             });
 
