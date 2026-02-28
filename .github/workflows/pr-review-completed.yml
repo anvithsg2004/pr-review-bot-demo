@@ -22,28 +22,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Analyze Review Status
-        id: review-status
+      - name: Process Review and Notify
         uses: actions/github-script@v7
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const fs = require('fs');
-            const config = JSON.parse(
-              fs.readFileSync('.github/config/team-config.json', 'utf8')
-            );
+            const { loadConfig, getSlackMention } = require('./.github/scripts/helpers/config');
+            const { sendToSlack, buildApprovedPayload, buildPartialApprovalPayload, buildChangesRequestedPayload } = require('./.github/scripts/helpers/slack');
+            const { cleanupAllLabels } = require('./.github/scripts/helpers/labels');
 
+            const config = loadConfig();
             const pr = context.payload.pull_request;
             const review = context.payload.review;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
 
-            // Get all reviews
+            // Analyze reviews
             const { data: allReviews } = await github.rest.pulls.listReviews({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: pr.number
+              owner, repo, pull_number: pr.number
             });
 
-            // Latest review per person
             const latestReviews = {};
             for (const r of allReviews) {
               if (!latestReviews[r.user.login] ||
@@ -54,281 +54,99 @@ jobs:
 
             const approvals = Object.entries(latestReviews)
               .filter(([_, r]) => r.state === 'APPROVED')
-              .map(([user, _]) => user);
+              .map(([user]) => user);
 
             const changesRequested = Object.entries(latestReviews)
               .filter(([_, r]) => r.state === 'CHANGES_REQUESTED')
-              .map(([user, _]) => user);
+              .map(([user]) => user);
 
             const stillPending = pr.requested_reviewers
               .filter(r => !latestReviews[r.login])
               .map(r => r.login);
 
-            const isFullyApproved = stillPending.length === 0 &&
-                                     changesRequested.length === 0 &&
-                                     approvals.length > 0;
+            const isFullyApproved =
+              stillPending.length === 0 &&
+              changesRequested.length === 0 &&
+              approvals.length > 0;
 
-            // Calculate review time
-            const prCreated = new Date(pr.created_at);
-            const reviewedAt = new Date(review.submitted_at);
-            const minutesTaken = Math.round((reviewedAt - prCreated) / (1000 * 60));
+            const reviewTime = Math.round(
+              (new Date(review.submitted_at) - new Date(pr.created_at)) / (1000 * 60)
+            ) + ' minutes';
 
-            // Slack mentions
-            function mention(username) {
-              const m = config.team_members[username];
-              return m ? `<@${m.slack_id}>` : `@${username}`;
+            const mention = (u) => getSlackMention(config, u);
+
+            console.log(`Review: ${review.state} by ${review.user.login}`);
+            console.log(`Fully approved: ${isFullyApproved}`);
+
+            // Send appropriate notification
+            let payload;
+
+            if (isFullyApproved) {
+              payload = buildApprovedPayload(
+                pr,
+                mention(pr.user.login),
+                approvals.map(a => mention(a)).join(', '),
+                reviewTime
+              );
+
+              await cleanupAllLabels(github, owner, repo, pr.number);
+              await github.rest.issues.addLabels({
+                owner, repo, issue_number: pr.number, labels: ['approved']
+              });
+
+            } else if (review.state === 'approved') {
+              payload = buildPartialApprovalPayload(
+                pr,
+                mention(review.user.login),
+                reviewTime,
+                stillPending.map(p => mention(p)).join(', ') || 'None',
+                approvals.length.toString(),
+                stillPending.length.toString()
+              );
+
+            } else if (review.state === 'changes_requested') {
+              payload = buildChangesRequestedPayload(
+                pr,
+                mention(review.user.login),
+                mention(pr.user.login),
+                (review.body || 'No comment').substring(0, 300)
+              );
             }
 
-            core.setOutput('review_state', review.state);
-            core.setOutput('reviewer', review.user.login);
-            core.setOutput('reviewer_mention', mention(review.user.login));
-            core.setOutput('author_mention', mention(pr.user.login));
-            core.setOutput('pr_number', pr.number.toString());
-            core.setOutput('pr_title', pr.title);
-            core.setOutput('pr_url', pr.html_url);
-            core.setOutput('review_body', (review.body || 'No comment').substring(0, 300));
-            core.setOutput('review_time', `${minutesTaken} minutes`);
-            core.setOutput('is_fully_approved', isFullyApproved.toString());
-            core.setOutput('approval_count', approvals.length.toString());
-            core.setOutput('pending_count', stillPending.length.toString());
-            core.setOutput('approved_by', approvals.map(a => mention(a)).join(', ') || 'None');
-            core.setOutput('still_waiting', stillPending.map(p => mention(p)).join(', ') || 'None');
-
-      # FULLY APPROVED
-      - name: Notify Fully Approved
-        if: steps.review-status.outputs.is_fully_approved == 'true'
-        uses: slackapi/slack-github-action@v1.26.0
-        with:
-          payload: |
-            {
-              "blocks": [
-                {
-                  "type": "header",
-                  "text": {
-                    "type": "plain_text",
-                    "text": "PR Approved — Ready to Merge",
-                    "emoji": false
-                  }
-                },
-                {
-                  "type": "section",
-                  "fields": [
-                    {
-                      "type": "mrkdwn",
-                      "text": "*PR:*\n<${{ steps.review-status.outputs.pr_url }}|#${{ steps.review-status.outputs.pr_number }}: ${{ steps.review-status.outputs.pr_title }}>"
-                    },
-                    {
-                      "type": "mrkdwn",
-                      "text": "*Author:*\n${{ steps.review-status.outputs.author_mention }}"
-                    },
-                    {
-                      "type": "mrkdwn",
-                      "text": "*Approved By:*\n${{ steps.review-status.outputs.approved_by }}"
-                    },
-                    {
-                      "type": "mrkdwn",
-                      "text": "*Review Time:*\n${{ steps.review-status.outputs.review_time }}"
-                    }
-                  ]
-                },
-                {
-                  "type": "context",
-                  "elements": [
-                    {
-                      "type": "mrkdwn",
-                      "text": "All reminders stopped. This PR is ready to merge."
-                    }
-                  ]
-                },
-                {
-                  "type": "actions",
-                  "elements": [
-                    {
-                      "type": "button",
-                      "text": {
-                        "type": "plain_text",
-                        "text": "Merge PR",
-                        "emoji": false
-                      },
-                      "url": "${{ steps.review-status.outputs.pr_url }}",
-                      "style": "primary"
-                    }
-                  ]
-                }
-              ]
-            }
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
-
-      # PARTIALLY APPROVED
-      - name: Notify Partially Approved
-        if: |
-          steps.review-status.outputs.review_state == 'approved' &&
-          steps.review-status.outputs.is_fully_approved == 'false'
-        uses: slackapi/slack-github-action@v1.26.0
-        with:
-          payload: |
-            {
-              "blocks": [
-                {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": "*Partial Approval* — *<${{ steps.review-status.outputs.pr_url }}|#${{ steps.review-status.outputs.pr_number }}: ${{ steps.review-status.outputs.pr_title }}>*\n\n${{ steps.review-status.outputs.reviewer_mention }} approved (review time: ${{ steps.review-status.outputs.review_time }})\nStill waiting on: ${{ steps.review-status.outputs.still_waiting }}\nApprovals: ${{ steps.review-status.outputs.approval_count }} received, ${{ steps.review-status.outputs.pending_count }} remaining"
-                  }
-                },
-                {
-                  "type": "context",
-                  "elements": [
-                    {
-                      "type": "mrkdwn",
-                      "text": "Reminders will continue for remaining reviewers."
-                    }
-                  ]
-                }
-              ]
-            }
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
-
-      # CHANGES REQUESTED
-      - name: Notify Changes Requested
-        if: steps.review-status.outputs.review_state == 'changes_requested'
-        uses: slackapi/slack-github-action@v1.26.0
-        with:
-          payload: |
-            {
-              "blocks": [
-                {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": "*Changes Requested* on *<${{ steps.review-status.outputs.pr_url }}|#${{ steps.review-status.outputs.pr_number }}: ${{ steps.review-status.outputs.pr_title }}>*\n\nReviewer: ${{ steps.review-status.outputs.reviewer_mention }}\n${{ steps.review-status.outputs.author_mention }} — please address the feedback.\n\n*Feedback:*\n> ${{ steps.review-status.outputs.review_body }}"
-                  }
-                },
-                {
-                  "type": "actions",
-                  "elements": [
-                    {
-                      "type": "button",
-                      "text": {
-                        "type": "plain_text",
-                        "text": "View Feedback",
-                        "emoji": false
-                      },
-                      "url": "${{ steps.review-status.outputs.pr_url }}",
-                      "style": "primary"
-                    }
-                  ]
-                }
-              ]
-            }
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
-
-      # CLEAN UP LABELS
-      - name: Clean Up Labels on Approval
-        if: steps.review-status.outputs.is_fully_approved == 'true'
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const prNumber = ${{ steps.review-status.outputs.pr_number }};
-            const removeLabels = [
-              'review-severity:low',
-              'review-severity:medium',
-              'review-severity:high',
-              'review-severity:critical'
-            ];
-            for (const label of removeLabels) {
-              try {
-                await github.rest.issues.removeLabel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: prNumber,
-                  name: label
-                });
-              } catch (e) {}
+            if (payload) {
+              const result = await sendToSlack(process.env.SLACK_WEBHOOK_URL, payload);
+              console.log('Slack response:', result);
             }
 
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: prNumber,
-              labels: ['approved']
-            });
-
-  # ============================================
-  # HANDLE PR MERGED / CLOSED
-  # ============================================
   handle-closed:
     name: Handle PR Closed or Merged
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' && github.event.action == 'closed'
 
     steps:
-      - name: Notify Merged
-        if: github.event.pull_request.merged == true
-        uses: slackapi/slack-github-action@v1.26.0
-        with:
-          payload: |
-            {
-              "blocks": [
-                {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": "*PR Merged*\n\n*<${{ github.event.pull_request.html_url }}|#${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}>*\n\nAuthor: *${{ github.event.pull_request.user.login }}*\nMerged into `${{ github.event.pull_request.base.ref }}`\n+${{ github.event.pull_request.additions }}/-${{ github.event.pull_request.deletions }}"
-                  }
-                }
-              ]
-            }
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Notify Closed Without Merge
-        if: github.event.pull_request.merged == false
-        uses: slackapi/slack-github-action@v1.26.0
-        with:
-          payload: |
-            {
-              "blocks": [
-                {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": "*PR Closed Without Merge*\n\n*<${{ github.event.pull_request.html_url }}|#${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}>*\n\nAll reminders stopped."
-                  }
-                }
-              ]
-            }
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
-
-      - name: Clean Up All Labels
+      - name: Notify and Cleanup
         uses: actions/github-script@v7
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const labels = [
-              'review-severity:low',
-              'review-severity:medium',
-              'review-severity:high',
-              'review-severity:critical',
-              'changes-requested'
-            ];
-            for (const label of labels) {
-              try {
-                await github.rest.issues.removeLabel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: context.payload.pull_request.number,
-                  name: label
-                });
-              } catch (e) {}
-            }
+            const { sendToSlack, buildMergedPayload, buildClosedPayload } = require('./.github/scripts/helpers/slack');
+            const { cleanupAllLabels } = require('./.github/scripts/helpers/labels');
+
+            const pr = context.payload.pull_request;
+
+            const payload = pr.merged
+              ? buildMergedPayload(pr)
+              : buildClosedPayload(pr);
+
+            const result = await sendToSlack(process.env.SLACK_WEBHOOK_URL, payload);
+            console.log('Slack response:', result);
+
+            await cleanupAllLabels(
+              github, context.repo.owner, context.repo.repo,
+              pr.number, ['changes-requested']
+            );

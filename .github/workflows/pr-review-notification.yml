@@ -1,0 +1,92 @@
+name: PR Review Notification
+
+on:
+  pull_request:
+    types: [opened, reopened, review_requested, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: pr-notify-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  notify-slack:
+    name: Send Slack Notification
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Build and Send Notification
+        uses: actions/github-script@v7
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { loadConfig, getSlackMention, getReviewerMentions } = require('./.github/scripts/helpers/config');
+            const { getPRFileDetails, cleanDescription } = require('./.github/scripts/helpers/pr-utils');
+            const { sendToSlack, buildNotificationPayload } = require('./.github/scripts/helpers/slack');
+            const { generateNotificationMessage } = require('./.github/scripts/helpers/messages');
+
+            const config = loadConfig();
+            const pr = context.payload.pull_request;
+
+            // Gather PR info
+            const authorMention = getSlackMention(config, pr.user.login);
+            const reviewerMentions = getReviewerMentions(config, pr.requested_reviewers);
+            const fileInfo = await getPRFileDetails(github, context.repo.owner, context.repo.repo, pr.number);
+
+            console.log('PR Title:', pr.title);
+            console.log('Author:', pr.user.login);
+            console.log('Size:', fileInfo.size);
+            console.log('Files:', fileInfo.fileNames);
+
+            // Generate message
+            const message = generateNotificationMessage({
+              pr,
+              config,
+              size: fileInfo.size,
+              additions: fileInfo.additions,
+              deletions: fileInfo.deletions,
+              files: fileInfo.files,
+              fileNames: fileInfo.fileNames,
+              branchFrom: pr.head.ref,
+              branchTo: pr.base.ref,
+              description: cleanDescription(pr.body)
+            });
+
+            console.log('Message:', message);
+
+            // Send to Slack
+            const payload = buildNotificationPayload(pr, message, authorMention, reviewerMentions, fileInfo);
+            const result = await sendToSlack(process.env.SLACK_WEBHOOK_URL, payload);
+            console.log('Slack response:', result);
+
+      - name: Comment on PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { loadConfig } = require('./.github/scripts/helpers/config');
+            const config = loadConfig();
+            const t = config.escalation_thresholds;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: `**Slack Notification Sent**\n\n` +
+                    `A review request has been posted to Slack.\n\n` +
+                    `**Escalation Timeline:**\n` +
+                    `- 0–${t.medium.minutes} min: Channel notification (LOW)\n` +
+                    `- ${t.medium.minutes}–${t.high.minutes} min: MEDIUM severity\n` +
+                    `- ${t.high.minutes}–${t.critical.minutes} min: HIGH severity\n` +
+                    `- ${t.critical.minutes}+ min: CRITICAL severity\n`
+            });

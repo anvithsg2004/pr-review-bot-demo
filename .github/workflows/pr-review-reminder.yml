@@ -1,0 +1,154 @@
+name: PR Review Reminder and Escalation
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run — only log, do not send Slack messages'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  check-pending-reviews:
+    name: Check Pending PR Reviews
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Find Pending PRs
+        id: pending-prs
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { loadConfig, getSlackMention, getReviewerMentions } = require('./.github/scripts/helpers/config');
+            const { getPRFileDetails, isPRIgnored, formatTimeElapsed, calculateSeverity } = require('./.github/scripts/helpers/pr-utils');
+            const { generateReminderMessage } = require('./.github/scripts/helpers/messages');
+
+            const config = loadConfig();
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            const { data: pullRequests } = await github.rest.pulls.list({
+              owner, repo, state: 'open', sort: 'created', direction: 'asc'
+            });
+
+            console.log(`Found ${pullRequests.length} open PRs`);
+            const pendingPRs = [];
+
+            for (const pr of pullRequests) {
+              console.log(`\nChecking PR #${pr.number}: ${pr.title}`);
+
+              if (pr.draft) { console.log('  Skipping: draft'); continue; }
+
+              const skipLabels = ['no-reminder', 'wip', 'on-hold'];
+              if (pr.labels.some(l => skipLabels.includes(l.name))) {
+                console.log('  Skipping: opt-out label');
+                continue;
+              }
+
+              const status = await isPRIgnored(github, owner, repo, pr);
+              if (!status.ignored) {
+                console.log(`  Skipping: ${status.reason}`);
+                continue;
+              }
+              console.log(`  PR is ${status.reason}`);
+
+              const fileInfo = await getPRFileDetails(github, owner, repo, pr.number);
+              const createdAt = new Date(pr.created_at);
+              const minutesElapsed = (new Date() - createdAt) / (1000 * 60);
+              const hoursElapsed = minutesElapsed / 60;
+              const timeString = formatTimeElapsed(minutesElapsed);
+              const createdFormatted = createdAt.toUTCString();
+              const severity = calculateSeverity(minutesElapsed, config.escalation_thresholds);
+
+              console.log(`  Elapsed: ${Math.round(minutesElapsed)} min | Severity: ${severity}`);
+
+              const statusMessage = generateReminderMessage({
+                pr, config,
+                files: fileInfo.files,
+                additions: fileInfo.additions,
+                deletions: fileInfo.deletions,
+                size: fileInfo.size,
+                timeString, createdFormatted, severity
+              });
+
+              console.log('  Message: ' + statusMessage.substring(0, 120) + '...');
+
+              pendingPRs.push({
+                number: pr.number,
+                title: pr.title,
+                url: pr.html_url,
+                author: pr.user.login,
+                author_mention: getSlackMention(config, pr.user.login),
+                reviewer_mentions: getReviewerMentions(config, pr.requested_reviewers),
+                branch_from: pr.head.ref,
+                branch_to: pr.base.ref,
+                minutes_elapsed: Math.round(minutesElapsed),
+                hours_elapsed: Math.round(hoursElapsed * 10) / 10,
+                time_string: timeString,
+                created_at: createdFormatted,
+                severity,
+                severity_label: severity.toUpperCase(),
+                size: fileInfo.size,
+                status_message: statusMessage,
+                additions: fileInfo.additions,
+                deletions: fileInfo.deletions,
+                changed_files: fileInfo.files.length,
+                file_names: fileInfo.fileNames
+              });
+            }
+
+            console.log(`\nTotal ignored PRs: ${pendingPRs.length}`);
+            core.setOutput('pending_prs', JSON.stringify(pendingPRs));
+            core.setOutput('should_notify', (pendingPRs.length > 0).toString());
+
+      - name: Send Reminder to Slack
+        if: steps.pending-prs.outputs.should_notify == 'true'
+        uses: actions/github-script@v7
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        with:
+          script: |
+            const { sendToSlack, buildReminderPayload } = require('./.github/scripts/helpers/slack');
+
+            const pendingPRs = JSON.parse(`${{ steps.pending-prs.outputs.pending_prs }}`);
+            const payload = buildReminderPayload(pendingPRs);
+
+            if (process.env.DRY_RUN === 'true') {
+              console.log('DRY RUN — Preview:');
+              console.log(JSON.stringify(payload, null, 2));
+              return;
+            }
+
+            const result = await sendToSlack(process.env.SLACK_WEBHOOK_URL, payload);
+            console.log('Slack response:', result);
+
+      - name: Update PR Labels
+        if: steps.pending-prs.outputs.should_notify == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { updateSeverityLabel } = require('./.github/scripts/helpers/labels');
+
+            const pendingPRs = JSON.parse(`${{ steps.pending-prs.outputs.pending_prs }}`);
+
+            for (const pr of pendingPRs) {
+              await updateSeverityLabel(
+                github, context.repo.owner, context.repo.repo,
+                pr.number, pr.severity
+              );
+            }
