@@ -5,33 +5,42 @@
       "severity": "LOW",
       "emoji": "🟢",
       "color": "#36a64f",
-      "notify": ["channel"]
+      "notify": [
+        "channel"
+      ]
     },
     "medium": {
       "minutes": 5,
       "severity": "MEDIUM",
       "emoji": "🟡",
       "color": "#ff9900",
-      "notify": ["channel", "tech_lead"]
+      "notify": [
+        "channel",
+        "tech_lead"
+      ]
     },
     "high": {
       "minutes": 10,
       "severity": "HIGH",
       "emoji": "🔴",
       "color": "#ff0000",
-      "notify": ["channel", "tech_lead", "manager"]
+      "notify": [
+        "channel",
+        "tech_lead",
+        "manager"
+      ]
     },
     "critical": {
       "minutes": 20,
       "severity": "CRITICAL",
       "emoji": "🚨",
       "color": "#8B0000",
-      "notify": ["channel", "tech_lead", "manager"]
+      "notify": [
+        "channel",
+        "tech_lead",
+        "manager"
+      ]
     }
-  },
-  "review_settings": {
-    "min_approvals": 2,
-    "stalled_threshold_minutes": 120
   },
   "team_members": {
     "anvithsg2004": {
@@ -44,6 +53,6 @@
     }
   },
   "slack_channel_id": "C0AGQDNJFCZ",
-  "_last_synced": "2026-02-27T09:41:50.182Z",
+  "_last_synced": "2026-03-02T09:51:43.764Z",
   "_member_count": 1
 }
